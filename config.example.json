@@ -1,0 +1,29 @@
+{
+  "sms_admin": {
+    "base_url": "https://ph.hzdaba.com:8899/api",
+    "username": "填写短信后台用户名",
+    "password": "填写短信后台密码",
+    "verify_ssl": false,
+    "request_timeout": 30
+  },
+  "pxb7": {
+    "base_url": "https://api-pc.pxb7.com/api",
+    "website": "https://www.pxb7.com",
+    "country_code": "86",
+    "request_timeout": 30
+  },
+  "login": {
+    "sms_wait_timeout": 60,
+    "sms_poll_interval": 3,
+    "sms_latest_count": 5,
+    "sms_max_age_seconds": 300,
+    "sms_keyword": "螃蟹账号",
+    "max_code_attempts": 3,
+    "status_log_interval": 15,
+    "default_password": "Aa123456",
+    "sms_trigger": "browser",
+    "browser_headless": true,
+    "browser_timeout": 180,
+    "browser_channel": "msedge"
+  }
+}
