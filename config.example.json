@@ -25,5 +25,9 @@
     "browser_headless": true,
     "browser_timeout": 180,
     "browser_channel": "msedge"
+  },
+  "excel": {
+    "copy_limit": 5,
+    "output_dir": ""
   }
 }

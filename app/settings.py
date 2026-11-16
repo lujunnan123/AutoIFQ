@@ -49,10 +49,17 @@ class LoginSettings:
 
 
 @dataclass(frozen=True)
+class ExcelSettings:
+    copy_limit: int = 5  # 0 表示复制全部记录
+    output_dir: str = ""  # 为空时输出到项目 output/ 目录
+
+
+@dataclass(frozen=True)
 class AppSettings:
     sms_admin: SmsAdminSettings
     pxb7: Pxb7Settings
     login: LoginSettings
+    excel: ExcelSettings
 
 
 def _as_float(value, default: float) -> float:
@@ -103,6 +110,7 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
 
     pxb7_raw = raw.get("pxb7") or {}
     login_raw = raw.get("login") or {}
+    excel_raw = raw.get("excel") or {}
 
     return AppSettings(
         sms_admin=SmsAdminSettings(
@@ -119,6 +127,10 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
             website=str(pxb7_raw.get("website") or "https://www.pxb7.com").rstrip("/"),
             country_code=str(pxb7_raw.get("country_code") or "86"),
             request_timeout=_as_float(pxb7_raw.get("request_timeout"), 30.0),
+        ),
+        excel=ExcelSettings(
+            copy_limit=max(0, _as_int(excel_raw.get("copy_limit"), 5)),
+            output_dir=str(excel_raw.get("output_dir") or "").strip(),
         ),
         login=LoginSettings(
             sms_wait_timeout=max(

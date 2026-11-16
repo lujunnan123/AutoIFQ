@@ -6,3 +6,4 @@ venv/
 .vscode/
 config.json
 config.local.json
+output/

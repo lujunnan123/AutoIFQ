@@ -53,14 +53,15 @@ class MainWindow(QMainWindow):
         self.runner: LoginRunner | None = None
         self._run_state = RunState.IDLE
         self._login_summary_received = False
+        self._table_result: tuple[bool, str] | None = None
 
         self._build_ui()
         self._connect_signals()
 
         self.action_panel.set_state(RunState.IDLE)
-        self.set_status("就绪 · 等待导入账号清单")
+        self.set_status("就绪 · 等待导入账号清单和源表格")
         self.log(
-            "AutoIFQ 界面已加载，请导入账号清单（.txt，格式：手机号----密码）后开始。",
+            "AutoIFQ 界面已加载，请导入账号清单（.txt）和源表格（Excel）后开始。",
             "accent",
         )
 
@@ -128,6 +129,9 @@ class MainWindow(QMainWindow):
         self.upload_panel.fileLoaded.connect(self._on_file_loaded)
         self.upload_panel.fileRejected.connect(self._on_file_rejected)
         self.upload_panel.fileCleared.connect(self._on_file_cleared)
+        self.upload_panel.excelLoaded.connect(self._on_excel_loaded)
+        self.upload_panel.excelRejected.connect(self._on_excel_rejected)
+        self.upload_panel.excelCleared.connect(self._on_excel_cleared)
 
         self.action_panel.start_requested.connect(self._start)
         self.action_panel.pause_requested.connect(self._toggle_pause)
@@ -166,7 +170,7 @@ class MainWindow(QMainWindow):
 
     def _on_file_loaded(self, path: str, size: int) -> None:
         self.log(
-            f"已导入询价清单：{Path(path).name}（{fmt_size(size)}）", "success"
+            f"已导入账号清单：{Path(path).name}（{fmt_size(size)}）", "success"
         )
         try:
             accounts = read_accounts(path)
@@ -178,18 +182,46 @@ class MainWindow(QMainWindow):
                 f"（{default_count} 个仅手机号，将使用默认密码）",
                 "info",
             )
-            self.set_status(f"账号清单已就绪 · 共 {len(accounts)} 个账号")
+            if self.upload_panel.excel_file():
+                self.set_status("文件已就绪 · 可以开始")
+            else:
+                self.set_status(
+                    f"账号清单已就绪 · 共 {len(accounts)} 个账号 · 等待源表格"
+                )
         except AccountParseError as exc:
             self.log(str(exc), "warn")
-            self.set_status("清单已导入 · 未识别到账号")
+            self.set_status("账号清单已导入 · 未识别到账号")
 
     def _on_file_rejected(self, message: str, level: str) -> None:
         self.log(message, level)
         QMessageBox.warning(self, "无法导入文件", message)
 
     def _on_file_cleared(self) -> None:
-        self.log("已移除询价清单。", "info")
-        self.set_status("就绪 · 等待导入账号清单")
+        self.log("已移除账号清单。", "info")
+        if self.upload_panel.excel_file():
+            self.set_status("源表格已就绪 · 等待账号清单")
+        else:
+            self.set_status("就绪 · 等待导入账号清单和源表格")
+
+    def _on_excel_loaded(self, path: str, size: int) -> None:
+        self.log(
+            f"已导入源表格：{Path(path).name}（{fmt_size(size)}）", "success"
+        )
+        if self.upload_panel.current_file():
+            self.set_status("文件已就绪 · 可以开始")
+        else:
+            self.set_status("源表格已就绪 · 等待账号清单")
+
+    def _on_excel_rejected(self, message: str, level: str) -> None:
+        self.log(message, level)
+        QMessageBox.warning(self, "无法导入源表格", message)
+
+    def _on_excel_cleared(self) -> None:
+        self.log("已移除源表格。", "info")
+        if self.upload_panel.current_file():
+            self.set_status("账号清单已就绪 · 等待源表格")
+        else:
+            self.set_status("就绪 · 等待导入账号清单和源表格")
 
     # ------------------------------------------------------------------
     # 运行控制
@@ -200,10 +232,17 @@ class MainWindow(QMainWindow):
             return
 
         file_path = self.upload_panel.current_file()
-        if not file_path:
-            self.log("请先导入账号清单文件（.txt，格式：手机号----密码）后再开始。", "warn")
-            self.upload_panel.flash()
-            self.set_status("缺少账号清单 · 请先导入文件")
+        excel_path = self.upload_panel.excel_file()
+        if not file_path or not excel_path:
+            missing: list[str] = []
+            if not file_path:
+                self.upload_panel.flash()
+                missing.append("账号清单（TXT）")
+            if not excel_path:
+                self.upload_panel.flash_excel()
+                missing.append("源表格（Excel）")
+            self.log(f"请先导入{'、'.join(missing)}后再开始。", "warn")
+            self.set_status("缺少文件 · 请同时导入账号清单和源表格")
             return
 
         try:
@@ -239,10 +278,14 @@ class MainWindow(QMainWindow):
         self.set_status("运行中 · 正在登录螃蟹平台")
 
         self._login_summary_received = False
-        self.runner = LoginRunner(accounts, threads, settings, self)
+        self._table_result = None
+        self.runner = LoginRunner(
+            accounts, threads, settings, excel_path, self
+        )
         self.runner.log_message.connect(self.log)
         self.runner.step_progress.connect(self._on_login_progress)
         self.runner.step_done.connect(self._on_login_step_done)
+        self.runner.table_result.connect(self._on_table_result)
         self.runner.summary.connect(self._on_login_summary)
         self.runner.finished.connect(self._on_runner_finished)
         self.runner.start()
@@ -298,6 +341,13 @@ class MainWindow(QMainWindow):
             detail=detail,
         )
 
+    def _on_table_result(self, success: bool, detail: str) -> None:
+        self._table_result = (success, detail)
+        if success:
+            self.set_status(f"表格已生成 · {Path(detail).name}")
+        else:
+            self.set_status("构建表格失败 · 查看日志")
+
     def _on_login_summary(self, success: int, total: int, cancelled: bool) -> None:
         self._login_summary_received = True
 
@@ -310,8 +360,19 @@ class MainWindow(QMainWindow):
 
         self._set_run_state(RunState.DONE)
         if success > 0:
-            self.progress_panel.set_chip("上号完成", "done")
-            self.set_status(f"上号完成 · 成功 {success}/{total}")
+            if self._table_result is not None:
+                table_ok, detail = self._table_result
+                if table_ok:
+                    self.progress_panel.set_chip("表格已生成", "done")
+                    self.set_status(
+                        f"上号完成 · 表格已生成（{Path(detail).name}）"
+                    )
+                else:
+                    self.progress_panel.set_chip("构建表格失败", "error")
+                    self.set_status("上号完成 · 构建表格失败")
+            else:
+                self.progress_panel.set_chip("上号完成", "done")
+                self.set_status(f"上号完成 · 成功 {success}/{total}")
         else:
             self.progress_panel.set_chip("上号失败", "error")
             self.set_status(f"上号结束 · 0/{total} 登录成功")

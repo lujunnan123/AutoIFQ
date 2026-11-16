@@ -1,10 +1,12 @@
 # AutoIFQ · 自动询价助手
 
-基于 PyQt6 的自动询价工具。当前已接入业务流程第 1 步：**螃蟹上号**（账号密码登录）。
+基于 PyQt6 的自动询价工具。当前已接入业务流程第 1 步：**螃蟹上号**（账号密码登录）和第 2 步：**构建表格**（从上传的 Excel 源表生成新表）。
 
 ## 已实现
 
 - 上传账号 TXT 清单，格式：`手机号----密码`；只有手机号时使用默认密码。
+- 同时上传源表格 Excel（`.xlsx/.xls/.xlsm`）；两个文件都上传后才能开始运行。
+- 登录螃蟹平台后，从源表读取指定列并生成新的 Excel 询价表，测试阶段复制前 5 条。
 - **协议密码登录**：密码使用页面同款 RSA 公钥加密后，通过 `twiceLogin` 接口提交。
 - **Playwright 仅用于获取易盾 token**：打开登录页、填写账号密码、触发登录请求，
   截取请求中的 `ydToken` 后**中止浏览器自己的登录请求**；真正的登录由协议客户端发送。
@@ -16,9 +18,18 @@
 > 平台密码登录接口强制校验易盾 token：不带 token 的纯协议请求会返回「易盾token为空」。
 > 因此无法在完全不获取易盾 token 的情况下完成登录；本工具将浏览器限定为 token 获取环节。
 
-> 后续步骤（表格写入、对话聊天、完成询价、填入表格）尚未接入。
+> 后续步骤（对话聊天、完成询价、填入表格）尚未接入。
 
 ## 运行
+
+推荐使用项目自带虚拟环境（Windows）：
+
+```bash
+venv\Scripts\python -m pip install -r requirements.txt
+venv\Scripts\python main.py
+```
+
+也可以直接使用系统 Python，但请确保安装依赖和运行程序使用**同一个解释器**：
 
 ```bash
 python -m pip install -r requirements.txt
@@ -26,6 +37,11 @@ python main.py
 ```
 
 首次运行前，把 `config.example.json` 复制为 `config.json`。
+
+> 如果启动时报 `No module named 'openpyxl'`、`No module named 'PyQt6'` 等错误，
+> 说明当前 IDE/终端选择的 Python 没有安装依赖。请在该解释器执行
+> `python -m pip install -r requirements.txt`，或在 VS Code 中选择
+> `venv\Scripts\python.exe` 作为解释器。
 
 ### Playwright 浏览器
 
@@ -55,7 +71,7 @@ python -m playwright install chromium
 
 ## 登录流程
 
-1. 上传账号 TXT。
+1. 同时上传账号 TXT 和源表格 Excel。
 2. 点击「开始询价」。
 3. 对每个账号：
    - Playwright（无头）打开螃蟹密码登录页，填写账号密码并勾选协议；
@@ -66,6 +82,7 @@ python -m playwright install chromium
    - 需要身份选择时自动换取 token；
    - 读取用户信息，日志打印用户名。
 4. 失败记录错误并自动继续下一个账号。
+5. 至少一个账号登录成功后，自动读取源表并构建新表格。
 
 > 登录请求由 Python 协议客户端发出；浏览器只负责通过易盾验证。
 > 若账号密码错误，接口返回「账号或密码错误」，不会消耗浏览器的登录状态。
@@ -76,6 +93,34 @@ python -m playwright install chromium
 当前的无头 Playwright 只用于取得该 token，实际登录请求已经完全协议化。
 如果拥有其他合法的易盾 token 获取渠道，可以将其替换为纯协议 token 来源；
 否则必须保留这个无头 token 获取步骤。
+
+## 源表格要求
+
+源表格中需要有这 6 个列名（列顺序可以不同）：
+
+```text
+账号、账号内容、可不可二次、收购日期、成本、拉群前报价
+```
+
+- 自动在前 50 行内查找表头，并选择第一个包含全部 6 列的工作表。
+- 读取列名时会忽略空格和换行；缺少列时日志会列出缺少项和当前表头。
+- 源表格只读，不会修改原文件。
+
+## 构建表格
+
+登录成功后自动执行：
+
+1. 读取源表符合条件的记录；
+2. 新建一个 Excel 工作簿（工作表名「自动询价」），写入上述 6 列；
+3. 默认保存到项目 `output/自动询价表格_时间戳.xlsx`，路径会写入日志；
+4. 测试阶段默认只复制前 5 条；把 `excel.copy_limit` 设为 `0` 可复制全部记录。
+
+如果源表有 8 条记录、限制为 5，日志会显示：
+
+```text
+构建表格完成：从「成品号」读取 8 条，复制 5 条。
+新表格已保存：.../output/自动询价表格_20261116_093405.xlsx
+```
 
 ## 配置说明
 
@@ -92,6 +137,10 @@ python -m playwright install chromium
     "browser_headless": true,        // 无头获取易盾 token；出现滑块时改 false
     "browser_timeout": 180,          // 等待易盾 token 的最长秒数
     "browser_channel": "msedge"      // msedge / chrome / 空字符串=Chromium
+  },
+  "excel": {
+    "copy_limit": 5,                 // 0 = 复制全部记录；测试阶段默认前 5 条
+    "output_dir": ""                 // 空 = 项目 output/ 目录
   }
 }
 ```
@@ -105,6 +154,9 @@ python -m playwright install chromium
 - **无需人工滑块**：实测账号的易盾为无感知验证，无头模式即可自动取得 token。
 - **易盾token为空**：说明协议请求没有携带 token，检查 token 获取步骤。
 - **浏览器没有弹出**：确认已安装 Playwright 与 Edge；或改用 Chromium 并安装浏览器。
+- **`No module named 'openpyxl'`**：运行程序的 Python 未安装依赖；在该解释器执行 `python -m pip install -r requirements.txt`，或改用项目 venv。
+- **源表缺少必要列**：日志会列出缺少的列名和当前表头，补全后重新运行。
+- **没有生成新表格**：检查是否至少有一个螃蟹账号登录成功；失败时查看日志中的表格错误。
 - 旧版短信链路诊断：
   ```bash
   python tools/sms_diagnose.py 13800138000
@@ -118,7 +170,7 @@ app/
   application.py             # QApplication + 主窗口启动
   constants.py               # 流程步骤、参数定义、尺寸等常量
   models.py                  # RunState / RunParams
-  runner.py                  # LoginRunner：后台线程执行协议密码登录
+  runner.py                  # LoginRunner：后台线程执行协议密码登录 + 构建表格
   settings.py                # config.json 加载与校验
   theme.py                   # 深色主题 QSS
   utils.py                   # 通用工具
@@ -127,6 +179,7 @@ app/
     phone_parser.py          # 手机号解析与脱敏（旧短信流程/通用）
     pxb7_client.py           # 螃蟹协议客户端（RSA 密码、token、用户信息）
     pxb7_yd_token.py         # Playwright 获取易盾 token（会中止浏览器登录请求）
+    excel_table.py           # 读取源表指定列并生成新询价表
     sms_code.py              # 旧版：短信验证码提取
     sms_admin_client.py      # 旧版：短信后台协议客户端
     pxb7_sms_trigger.py      # 旧版：Playwright 触发登录短信
@@ -136,7 +189,7 @@ app/
     header_bar.py            # 顶部标题栏
     card.py                  # 通用卡片容器
     click_outside.py         # 全局「点击外部确认」过滤器
-    upload_panel.py          # 账号清单上传卡片
+    upload_panel.py          # 账号清单 + 源表格上传卡片
     drop_zone.py             # 点击 / 拖拽导入区域
     progress_panel.py        # 询价进度卡片
     segmented_progress.py    # 五段式进度可视化组件

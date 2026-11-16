@@ -11,7 +11,7 @@ WINDOW_TITLE = "AutoIFQ · 自动询价助手"
 APP_VERSION = "AutoIFQ UI · v1.0"
 
 DEFAULT_WINDOW_SIZE = (1200, 800)
-MIN_WINDOW_SIZE = (1040, 760)
+MIN_WINDOW_SIZE = (1040, 800)
 SIDE_PANEL_WIDTH = 392
 
 # ---- 文件导入 -------------------------------------------------------------
@@ -32,7 +32,7 @@ class StepSpec:
 
 STEPS: tuple[StepSpec, ...] = (
     StepSpec("螃蟹上号", "账号登录与环境初始化", "账号登录 · 环境自检"),
-    StepSpec("表格写入", "解析清单并写入表格", "解析清单 · 写入数据表"),
+    StepSpec("构建表格", "读取源表并生成询价表", "读取源表 · 生成新表格"),
     StepSpec("对话聊天", "按模板与商家沟通询价", "按模板与商家沟通"),
     StepSpec("完成询价", "收集并汇总商家报价", "汇总报价 · 校验结果"),
     StepSpec("填入表格", "将报价结果回填表格", "回填表格 · 保存结果"),

@@ -5,10 +5,12 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from .services.accounts import Account
+from .services.excel_table import ExcelTableError, copy_source_table
 from .services.phone_parser import mask_phone
 from .services.pxb7_client import Pxb7Client, Pxb7Error, Pxb7LoginError
 from .services.pxb7_yd_token import Pxb7BrowserYdTokenProvider
@@ -21,6 +23,7 @@ class LoginRunner(QThread):
     log_message = pyqtSignal(str, str)
     step_progress = pyqtSignal(int, float, str)  # index, percent, detail
     step_done = pyqtSignal(int, bool, str)  # index, success, detail
+    table_result = pyqtSignal(bool, str)  # success, output path or error
     summary = pyqtSignal(int, int, bool)  # success, total, cancelled
 
     def __init__(
@@ -28,12 +31,14 @@ class LoginRunner(QThread):
         accounts: list[Account],
         threads: int,
         settings: AppSettings,
+        excel_path: str,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._accounts = list(accounts)
         self._threads = max(1, min(int(threads), max(1, len(self._accounts))))
         self._settings = settings
+        self._excel_path = excel_path
         self._cancel = threading.Event()
         self._pause = threading.Event()
         self._token_provider = Pxb7BrowserYdTokenProvider(
@@ -114,7 +119,7 @@ class LoginRunner(QThread):
                         done / total * 100,
                         f"已完成 {done}/{total} · 成功 {success}",
                     )
-        finally:
+
             cancelled = self._cancel.is_set()
             if not cancelled:
                 self.step_done.emit(0, success > 0, f"成功 {success}/{total}")
@@ -122,19 +127,70 @@ class LoginRunner(QThread):
                     self._log(
                         f"螃蟹上号完成：成功 {success}/{total} 个账号", "success"
                     )
+                    self._run_excel_step()
                 else:
                     self._log(
                         f"螃蟹上号结束：{total} 个账号均未登录成功", "warn"
                     )
+                    self._log("未成功登录任何账号，跳过构建表格。", "warn")
                 self._log(
-                    "表格写入 / 对话聊天 / 完成询价 / 填入表格待后续接入。",
-                    "muted",
+                    "对话聊天 / 完成询价 / 填入表格待后续接入。", "muted"
                 )
             else:
                 self._log(
                     f"已停止螃蟹上号：完成 {done}/{total}，成功 {success}", "warn"
                 )
-            self.summary.emit(success, total, cancelled)
+        finally:
+            self.summary.emit(success, total, self._cancel.is_set())
+
+    # ------------------------------------------------------------------
+    # 构建表格
+    # ------------------------------------------------------------------
+
+    def _run_excel_step(self) -> None:
+        if self._cancel.is_set():
+            return
+        self.step_progress.emit(1, 0.0, "正在读取源表格…")
+        self._log(
+            f"开始读取源表格：{Path(self._excel_path).name}", "info"
+        )
+        try:
+            result = copy_source_table(
+                self._excel_path,
+                limit=self._settings.excel.copy_limit,
+                output_dir=self._settings.excel.output_dir or None,
+            )
+        except ExcelTableError as exc:
+            self.step_done.emit(1, False, str(exc))
+            self.table_result.emit(False, str(exc))
+            self._log(f"构建表格失败：{exc}", "error")
+            return
+        except Exception as exc:  # 防御性兜底
+            message = f"构建表格异常：{exc}"
+            self.step_done.emit(1, False, message)
+            self.table_result.emit(False, message)
+            self._log(message, "error")
+            return
+
+        detail = (
+            f"已复制 {result.copied_records}/{result.total_records} 条 · "
+            f"{result.output_path.name}"
+        )
+        self.step_progress.emit(1, 100.0, detail)
+        self.step_done.emit(1, True, detail)
+        self._log(
+            f"构建表格完成：从「{result.source_sheet}」读取 "
+            f"{result.total_records} 条，复制 {result.copied_records} 条。",
+            "success",
+        )
+        self._log(f"新表格已保存：{result.output_path}", "success")
+        if result.copied_records < result.total_records:
+            self._log(
+                f"测试阶段仅复制前 {result.copied_records} 条；"
+                "将 config.json 的 excel.copy_limit 设为 0 可复制全部。",
+                "muted",
+            )
+        self.table_result.emit(True, str(result.output_path))
 
     # ------------------------------------------------------------------
     # 单账号登录

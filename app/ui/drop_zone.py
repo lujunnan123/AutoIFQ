@@ -1,4 +1,4 @@
-"""支持点击选择与拖拽导入的 TXT 文件区域。"""
+"""支持点击选择与拖拽导入的文件区域（TXT / Excel）。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..constants import FILE_DIALOG_FILTER, FILE_SIZE_HINT
 from ..utils import fmt_size, repolish
 from .elided_label import ElidedLabel
 
@@ -26,16 +25,37 @@ class DropZone(QFrame):
     fileSelected = pyqtSignal(str)
     fileCleared = pyqtSignal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        title: str = "点击选择或拖拽 TXT 文件到此处",
+        hint: str = "仅支持 .txt 单个文件 · 不超过 20 MB",
+        browse_text: str = "浏览文件",
+        file_filter: str = "文本文件 (*.txt);;所有文件 (*)",
+        extensions: tuple[str, ...] = (".txt",),
+        badge_text: str = "TXT",
+        dialog_title: str = "选择文件",
+        compact: bool = False,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("DropZone")
         self.setAcceptDrops(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(108)
+        self.setMinimumHeight(100 if compact else 108)
         self._file_path: str | None = None
+        self._title = title
+        self._hint = hint
+        self._browse_text = browse_text
+        self._file_filter = file_filter
+        self._extensions = tuple(ext.lower() for ext in extensions)
+        self._badge_text = badge_text
+        self._dialog_title = dialog_title
+        self._compact = compact
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 14)
+        margin = 10 if compact else 14
+        root.setContentsMargins(margin, margin, margin, margin)
         root.setSpacing(0)
 
         self._pages = QStackedLayout()
@@ -49,25 +69,26 @@ class DropZone(QFrame):
     def _build_empty_page(self) -> QWidget:
         page = QWidget()
         row = QHBoxLayout(page)
-        row.setContentsMargins(4, 4, 4, 4)
-        row.setSpacing(14)
+        row.setContentsMargins(2, 2, 2, 2)
+        row.setSpacing(10 if self._compact else 14)
+        size = 36 if self._compact else 42
 
         icon = QLabel("↑")
         icon.setObjectName("DropIcon")
-        icon.setFixedSize(42, 42)
+        icon.setFixedSize(size, size)
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         text_col = QVBoxLayout()
         text_col.setSpacing(3)
-        title = QLabel("点击选择或拖拽 TXT 文件到此处")
+        title = QLabel(self._title)
         title.setObjectName("DropTitle")
-        hint = QLabel(FILE_SIZE_HINT)
+        hint = QLabel(self._hint)
         hint.setObjectName("FileMeta")
         text_col.addWidget(title)
         text_col.addWidget(hint)
         text_col.addStretch(1)
 
-        browse = QPushButton("浏览文件")
+        browse = QPushButton(self._browse_text)
         browse.setObjectName("GhostStrong")
         browse.setCursor(Qt.CursorShape.PointingHandCursor)
         browse.clicked.connect(self._browse)
@@ -80,12 +101,13 @@ class DropZone(QFrame):
     def _build_file_page(self) -> QWidget:
         page = QWidget()
         row = QHBoxLayout(page)
-        row.setContentsMargins(4, 4, 4, 4)
-        row.setSpacing(14)
+        row.setContentsMargins(2, 2, 2, 2)
+        row.setSpacing(8 if self._compact else 14)
+        size = 36 if self._compact else 42
 
-        badge = QLabel("TXT")
+        badge = QLabel(self._badge_text)
         badge.setObjectName("FileBadge")
-        badge.setFixedSize(42, 42)
+        badge.setFixedSize(size, size)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         text_col = QVBoxLayout()
@@ -118,7 +140,7 @@ class DropZone(QFrame):
 
     def _browse(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择询价清单", "", FILE_DIALOG_FILTER
+            self, self._dialog_title, "", self._file_filter
         )
         if path:
             self.fileSelected.emit(path)
@@ -161,19 +183,19 @@ class DropZone(QFrame):
         self.setProperty("dragActive", active)
         repolish(self)
 
-    @staticmethod
-    def _first_txt(event) -> str | None:
+    def _first_file(self, event) -> str | None:
         mime = event.mimeData()
         if not mime.hasUrls():
             return None
         for url in mime.urls():
             local = url.toLocalFile()
-            if local.lower().endswith(".txt"):
+            suffix = Path(local).suffix.lower()
+            if not self._extensions or suffix in self._extensions:
                 return local
         return None
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
-        if self._first_txt(event):
+        if self._first_file(event):
             event.acceptProposedAction()
             self._set_drag_active(True)
         else:
@@ -185,7 +207,7 @@ class DropZone(QFrame):
 
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
         self._set_drag_active(False)
-        path = self._first_txt(event)
+        path = self._first_file(event)
         if path:
             event.acceptProposedAction()
             self.fileSelected.emit(path)
