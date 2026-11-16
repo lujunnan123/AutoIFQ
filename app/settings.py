@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if getattr(sys, "frozen", False):
+    # PyInstaller 打包后：config/data/output 放在 exe 同目录
+    PROJECT_ROOT = Path(sys.executable).resolve().parent
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.json"
 
 
@@ -54,12 +59,41 @@ class ExcelSettings:
     output_dir: str = ""  # 为空时输出到项目 output/ 目录
 
 
+FEISHU_LOGIN_URL = (
+    "https://accounts.feishu.cn/accounts/page/login?app_id=2&no_trap=1"
+    "&query_scope=all"
+    "&redirect_uri=https%3A%2F%2Fmcnd1pwpmqfu.feishu.cn%2Fbase%2F"
+    "CiobbXJADaxgZYszgJ6cYu79nbc%3Ftable%3Dtblb6ULuiNj6hcBF"
+    "%26view%3DvewpjEN0P6"
+    "&should_pass_through=1&utm_from=organic_ccm_share_web"
+    "&force_use_feishu_login=1"
+)
+FEISHU_TABLE_URL = (
+    "https://mcnd1pwpmqfu.feishu.cn/base/CiobbXJADaxgZYszgJ6cYu79nbc"
+    "?table=tblb6ULuiNj6hcBF&view=vewpjEN0P6"
+)
+
+
+@dataclass(frozen=True)
+class FeishuSettings:
+    login_url: str = FEISHU_LOGIN_URL
+    table_url: str = FEISHU_TABLE_URL
+    tenant_name: str = "杭州维音信息科技公司"
+    base_name: str = "Auto测试库"
+    table_name: str = "三角洲成品号--小新"
+    state_path: str = "data/feishu_state.json"
+    browser_channel: str = "msedge"
+    login_timeout: float = 300.0
+    fetch_headless: bool = True
+
+
 @dataclass(frozen=True)
 class AppSettings:
     sms_admin: SmsAdminSettings
     pxb7: Pxb7Settings
     login: LoginSettings
     excel: ExcelSettings
+    feishu: FeishuSettings
 
 
 def _as_float(value, default: float) -> float:
@@ -111,6 +145,7 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
     pxb7_raw = raw.get("pxb7") or {}
     login_raw = raw.get("login") or {}
     excel_raw = raw.get("excel") or {}
+    feishu_raw = raw.get("feishu") or {}
 
     return AppSettings(
         sms_admin=SmsAdminSettings(
@@ -131,6 +166,29 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
         excel=ExcelSettings(
             copy_limit=max(0, _as_int(excel_raw.get("copy_limit"), 5)),
             output_dir=str(excel_raw.get("output_dir") or "").strip(),
+        ),
+        feishu=FeishuSettings(
+            login_url=str(feishu_raw.get("login_url") or FEISHU_LOGIN_URL),
+            table_url=str(feishu_raw.get("table_url") or FEISHU_TABLE_URL),
+            tenant_name=str(
+                feishu_raw.get("tenant_name") or "杭州维音信息科技公司"
+            ),
+            base_name=str(feishu_raw.get("base_name") or "Auto测试库"),
+            table_name=str(
+                feishu_raw.get("table_name") or "三角洲成品号--小新"
+            ),
+            state_path=str(
+                feishu_raw.get("state_path") or "data/feishu_state.json"
+            ),
+            browser_channel=str(
+                feishu_raw.get("browser_channel") or "msedge"
+            ).strip(),
+            login_timeout=max(
+                30.0, _as_float(feishu_raw.get("login_timeout"), 300.0)
+            ),
+            fetch_headless=_as_bool(
+                feishu_raw.get("fetch_headless"), True
+            ),
         ),
         login=LoginSettings(
             sms_wait_timeout=max(

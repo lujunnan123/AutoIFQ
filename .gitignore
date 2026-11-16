@@ -7,3 +7,7 @@ venv/
 config.json
 config.local.json
 output/
+data/
+build/
+dist/
+*.spec

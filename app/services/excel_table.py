@@ -1,8 +1,9 @@
-"""从上传的 Excel 源表读取指定列，并生成新的询价表格。"""
+"""读取源表指定列（飞书多维表格或本地 Excel），生成新的询价表格。"""
 
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,8 +17,8 @@ from ..settings import PROJECT_ROOT
 REQUIRED_COLUMNS: tuple[str, ...] = (
     "账号",
     "账号内容",
-    "可不可二次",
     "收购日期",
+    "可不可二次",
     "成本",
     "拉群前报价",
 )
@@ -50,7 +51,16 @@ class _SheetData:
 def _normalize(value: object) -> str:
     if value is None:
         return ""
-    text = str(value).replace("\n", "").replace("\r", "").replace("　", "")
+    text = (
+        str(value)
+        .replace("\n", "")
+        .replace("\r", "")
+        .replace("　", "")
+        .replace("【", "")
+        .replace("】", "")
+        .replace("[", "")
+        .replace("]", "")
+    )
     return "".join(text.split())
 
 
@@ -210,6 +220,50 @@ def copy_source_table(
     if not records:
         raise ExcelTableError("源表表头下没有数据记录。")
 
+    return _write_output(
+        records,
+        source_name=sheet.name,
+        limit=limit,
+        output_dir=output_dir,
+    )
+
+
+def build_result_table(
+    records: Sequence[Sequence[object]],
+    source_name: str,
+    *,
+    limit: int = 5,
+    output_dir: str | Path | None = None,
+) -> ExcelCopyResult:
+    """根据飞书等数据源的行记录，生成新的询价表格。"""
+    cleaned: list[tuple[object, ...]] = []
+    for record in records:
+        values = list(record[: len(REQUIRED_COLUMNS)])
+        if len(values) < len(REQUIRED_COLUMNS):
+            values.extend([None] * (len(REQUIRED_COLUMNS) - len(values)))
+        row = tuple(values)
+        if all(_is_empty(value) for value in row):
+            continue
+        cleaned.append(row)
+
+    if not cleaned:
+        raise ExcelTableError("数据源中没有可写入的记录。")
+
+    return _write_output(
+        cleaned,
+        source_name=source_name,
+        limit=limit,
+        output_dir=output_dir,
+    )
+
+
+def _write_output(
+    records: Sequence[Sequence[object]],
+    *,
+    source_name: str,
+    limit: int,
+    output_dir: str | Path | None,
+) -> ExcelCopyResult:
     copy_count = len(records) if limit <= 0 else min(limit, len(records))
 
     if output_dir:
@@ -275,7 +329,7 @@ def copy_source_table(
 
     return ExcelCopyResult(
         output_path=output_path,
-        source_sheet=sheet.name,
+        source_sheet=source_name,
         output_sheet=worksheet.title,
         total_records=len(records),
         copied_records=copy_count,

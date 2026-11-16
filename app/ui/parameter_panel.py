@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer
+from collections.abc import Mapping
+
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
@@ -19,6 +21,8 @@ from .click_outside import ClickOutsideFilter
 
 
 class ParameterPanel(Card):
+    valuesChanged = pyqtSignal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("运行参数", "线程、间隔与询价范围", parent)
 
@@ -79,6 +83,9 @@ class ParameterPanel(Card):
         hint.setObjectName("HintLabel")
         self.body.addWidget(hint)
 
+        for spin in self._spins.values():
+            spin.valueChanged.connect(self._on_value_changed)
+
         # 点击界面除当前数值输入框外的任意位置时确认内容
         self._click_filter = ClickOutsideFilter(self._on_outside_click, self)
 
@@ -88,14 +95,49 @@ class ParameterPanel(Card):
 
     def build_params(self, phrases: tuple[str, ...]) -> RunParams:
         """把界面上的参数收集为不可变的 RunParams。"""
+        values = self.values()
         return RunParams(
-            threads=int(self._spins["threads"].value()),
-            interval_sec=float(self._spins["interval_sec"].value()),
-            merchant_count=int(self._spins["merchant_count"].value()),
-            timeout_sec=int(self._spins["timeout_sec"].value()),
-            retries=int(self._spins["retries"].value()),
+            threads=int(values["threads"]),
+            interval_sec=float(values["interval_sec"]),
+            merchant_count=int(values["merchant_count"]),
+            timeout_sec=int(values["timeout_sec"]),
+            retries=int(values["retries"]),
             phrases=phrases,
         )
+
+    def values(self) -> dict[str, int | float]:
+        """读取当前参数，并先确认输入框内未提交的文本。"""
+        result: dict[str, int | float] = {}
+        for key, spin in self._spins.items():
+            blocked = spin.blockSignals(True)
+            try:
+                spin.interpretText()
+            finally:
+                spin.blockSignals(blocked)
+            result[key] = spin.value()
+        return result
+
+    def apply_values(self, values: Mapping[str, float]) -> None:
+        """恢复持久化参数；越界值会被控件自动钳制。"""
+        for key, spin in self._spins.items():
+            if key not in values:
+                continue
+            try:
+                value = float(values[key])
+            except (TypeError, ValueError):
+                continue
+            blocked = spin.blockSignals(True)
+            try:
+                if isinstance(spin, QDoubleSpinBox):
+                    spin.setValue(value)
+                else:
+                    spin.setValue(int(round(value)))
+            finally:
+                spin.blockSignals(blocked)
+            self._committed_values[key] = float(spin.value())
+
+    def _on_value_changed(self, _value) -> None:
+        self.valuesChanged.emit()
 
     # ------------------------------------------------------------------
     # 失焦确认

@@ -29,5 +29,16 @@
   "excel": {
     "copy_limit": 5,
     "output_dir": ""
+  },
+  "feishu": {
+    "login_url": "https://accounts.feishu.cn/accounts/page/login?app_id=2&no_trap=1&query_scope=all&redirect_uri=https%3A%2F%2Fmcnd1pwpmqfu.feishu.cn%2Fbase%2FCiobbXJADaxgZYszgJ6cYu79nbc%3Ftable%3Dtblb6ULuiNj6hcBF%26view%3DvewpjEN0P6&should_pass_through=1&utm_from=organic_ccm_share_web&force_use_feishu_login=1",
+    "table_url": "https://mcnd1pwpmqfu.feishu.cn/base/CiobbXJADaxgZYszgJ6cYu79nbc?table=tblb6ULuiNj6hcBF&view=vewpjEN0P6",
+    "tenant_name": "杭州维音信息科技公司",
+    "base_name": "Auto测试库",
+    "table_name": "三角洲成品号--小新",
+    "state_path": "data/feishu_state.json",
+    "browser_channel": "msedge",
+    "login_timeout": 300,
+    "fetch_headless": true
   }
 }

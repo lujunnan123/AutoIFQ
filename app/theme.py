@@ -91,14 +91,41 @@ QLabel#AppSub {
     color: #687b91;
     font-size: 11px;
 }
-QLabel#PreviewChip {
-    color: #8fc1ff;
-    background-color: rgba(63, 132, 255, 24);
-    border: 1px solid rgba(63, 132, 255, 64);
+QPushButton#FeishuChip {
     border-radius: 10px;
-    padding: 5px 12px;
+    padding: 6px 14px;
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 700;
+}
+QPushButton#FeishuChip[state="offline"] {
+    color: #93a4ba;
+    background-color: rgba(147, 164, 186, 18);
+    border: 1px solid rgba(147, 164, 186, 55);
+}
+QPushButton#FeishuChip[state="offline"]:hover {
+    color: #c7d5e6;
+    background-color: rgba(147, 164, 186, 32);
+    border-color: rgba(147, 164, 186, 90);
+}
+QPushButton#FeishuChip[state="logging"] {
+    color: #79b4ff;
+    background-color: rgba(63, 132, 255, 28);
+    border: 1px solid rgba(63, 132, 255, 90);
+}
+QPushButton#FeishuChip[state="online"] {
+    color: #45e0a8;
+    background-color: rgba(46, 204, 143, 24);
+    border: 1px solid rgba(46, 204, 143, 72);
+}
+QPushButton#FeishuChip[state="online"]:hover {
+    color: #7cf0c4;
+    background-color: rgba(46, 204, 143, 36);
+    border-color: rgba(46, 204, 143, 105);
+}
+QPushButton#FeishuChip[state="error"] {
+    color: #ff8b9c;
+    background-color: rgba(255, 93, 115, 24);
+    border: 1px solid rgba(255, 93, 115, 72);
 }
 QLabel#CardTitle {
     color: #edf4fd;
@@ -163,6 +190,134 @@ QLabel#StatusChip[state="error"] {
     color: #ff8b9c;
     background-color: rgba(255, 93, 115, 26);
     border: 1px solid rgba(255, 93, 115, 72);
+}
+
+/* ---------- 询价进度 / 线程 ---------- */
+QFrame#BuildRow {
+    background-color: #0d141d;
+    border: 1px solid #223043;
+    border-radius: 9px;
+}
+QLabel#BuildTitle {
+    color: #dfe9f5;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#BuildDetail {
+    color: #77899f;
+    font-size: 11px;
+}
+QLabel#SectionTitle {
+    color: #c9d8e8;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#ThreadEmpty {
+    color: #5b6d82;
+    font-size: 11px;
+}
+QScrollArea#ThreadScroll,
+QWidget#ThreadViewport,
+QWidget#ThreadList {
+    background: transparent;
+    border: none;
+}
+QFrame#ThreadRow {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #1d2836;
+}
+QFrame#ThreadRow:hover {
+    background-color: #0f1723;
+}
+QLabel#ThreadTitle {
+    color: #e7eef8;
+    font-size: 12px;
+    font-weight: 700;
+}
+QLabel#ThreadPhone {
+    color: #77899f;
+    font-size: 11px;
+}
+QLabel#ThreadStepName {
+    color: #a9b8ca;
+    font-size: 11px;
+}
+QLabel#ThreadStepStatus {
+    color: #77899f;
+    font-size: 10px;
+}
+QLabel#ThreadMeta {
+    color: #5f7186;
+    font-size: 10px;
+}
+QLabel#ThreadPercent {
+    color: #a9c8ff;
+    font-size: 10px;
+    font-weight: 700;
+}
+QLabel#StepDot {
+    font-size: 10px;
+}
+QLabel#StepDot[state="pending"] {
+    color: #3b4c61;
+}
+QLabel#StepDot[state="running"] {
+    color: #4f8cff;
+}
+QLabel#StepDot[state="done"] {
+    color: #2ecc8f;
+}
+QLabel#StepDot[state="error"] {
+    color: #ff5d73;
+}
+QLabel#MiniChip {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 8px;
+}
+QLabel#MiniChip[state="idle"] {
+    color: #93a4ba;
+    background-color: rgba(147, 164, 186, 18);
+    border: 1px solid rgba(147, 164, 186, 45);
+}
+QLabel#MiniChip[state="running"] {
+    color: #79b4ff;
+    background-color: rgba(63, 132, 255, 26);
+    border: 1px solid rgba(63, 132, 255, 70);
+}
+QLabel#MiniChip[state="done"] {
+    color: #45e0a8;
+    background-color: rgba(46, 204, 143, 22);
+    border: 1px solid rgba(46, 204, 143, 60);
+}
+QLabel#MiniChip[state="error"] {
+    color: #ff8b9c;
+    background-color: rgba(255, 93, 115, 22);
+    border: 1px solid rgba(255, 93, 115, 60);
+}
+QProgressBar#ThreadBar {
+    background-color: #121924;
+    border: 1px solid #1d2836;
+    border-radius: 3px;
+}
+QProgressBar#ThreadBar::chunk {
+    border-radius: 2px;
+    background-color: #3f84ff;
+}
+QProgressBar#ThreadBar[status="done"]::chunk {
+    background-color: #2ecc8f;
+}
+QProgressBar#ThreadBar[status="error"]::chunk {
+    background-color: #ff5d73;
+}
+QProgressBar#ThreadBar[status="running"]::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 #3f84ff, stop:1 #35d6c0);
+}
+QProgressBar#ThreadBar[status="idle"]::chunk {
+    background-color: #2b3a4d;
 }
 
 /* ---------- 拖放区 ---------- */
@@ -394,6 +549,34 @@ QPushButton#GhostDanger:disabled {
     color: #5a3a42;
     background-color: transparent;
     border-color: #2a1c21;
+}
+QPushButton#ManualTestButton {
+    background-color: #0d141d;
+    border: 1px dashed #2c4058;
+    border-radius: 12px;
+    color: #9dc5ff;
+    font-size: 13px;
+    font-weight: 700;
+}
+QPushButton#ManualTestButton:hover {
+    background-color: #0f1723;
+    border-color: #3f84ff;
+    color: #cfe3ff;
+}
+QPushButton#ManualTestButton:pressed {
+    background-color: #0b121a;
+}
+
+/* ---------- 手动测试窗口 ---------- */
+QDialog#ManualTestWindow {
+    background-color: #0b1017;
+}
+QLabel#ManualTestPlaceholder {
+    color: #5b6d82;
+    background-color: #0d141d;
+    border: 1px dashed #27364a;
+    border-radius: 12px;
+    font-size: 13px;
 }
 
 /* ---------- 询问话术列表 ---------- */

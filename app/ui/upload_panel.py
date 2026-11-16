@@ -1,68 +1,55 @@
-"""账号清单 + 源表格上传卡片。"""
+"""账号清单上传卡片，以及手动测试入口。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import QHBoxLayout, QWidget
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QHBoxLayout, QPushButton, QWidget
 
 from ..constants import MAX_FILE_SIZE
 from .card import Card
 from .drop_zone import DropZone
 
-EXCEL_EXTENSIONS = (".xlsx", ".xls", ".xlsm")
-
 
 class UploadPanel(Card):
-    """两个并排的上传区：账号 TXT 与源表格 Excel。"""
-
-    fileLoaded = pyqtSignal(str, int)  # account txt path, size
+    fileLoaded = pyqtSignal(str, int)
     fileRejected = pyqtSignal(str, str)
     fileCleared = pyqtSignal()
-
-    excelLoaded = pyqtSignal(str, int)
-    excelRejected = pyqtSignal(str, str)
-    excelCleared = pyqtSignal()
+    manualTestRequested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(
-            "上传文件", "账号清单（TXT）+ 源表格（Excel），两项都需导入", parent
+            "上传账号清单", "TXT 格式：手机号----密码（仅手机号使用默认密码）", parent
         )
         self._file_path: str | None = None
-        self._excel_path: str | None = None
 
         row = QHBoxLayout()
         row.setSpacing(12)
 
         self.drop_zone = DropZone(
-            title="账号清单 TXT",
-            hint=".txt · 手机号----密码",
-            browse_text="选择",
+            title="点击选择或拖拽 TXT 文件到此处",
+            hint="仅支持 .txt 单个文件 · 不超过 20 MB",
+            browse_text="浏览文件",
             file_filter="文本文件 (*.txt);;所有文件 (*)",
             extensions=(".txt",),
             badge_text="TXT",
             dialog_title="选择账号清单",
-            compact=True,
         )
         self.drop_zone.fileSelected.connect(self._on_file_selected)
         self.drop_zone.fileCleared.connect(self._on_file_cleared)
 
-        self.excel_drop_zone = DropZone(
-            title="源表格 Excel",
-            hint=".xlsx / .xls",
-            browse_text="选择",
-            file_filter="Excel 文件 (*.xlsx *.xls *.xlsm);;所有文件 (*)",
-            extensions=EXCEL_EXTENSIONS,
-            badge_text="XLSX",
-            dialog_title="选择源表格",
-            compact=True,
+        self.manual_test_btn = QPushButton("手动测试")
+        self.manual_test_btn.setObjectName("ManualTestButton")
+        self.manual_test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.manual_test_btn.setFixedSize(140, 108)
+        self.manual_test_btn.setToolTip("打开手动测试界面")
+        self.manual_test_btn.clicked.connect(
+            lambda: self.manualTestRequested.emit()
         )
-        self.excel_drop_zone.fileSelected.connect(self._on_excel_selected)
-        self.excel_drop_zone.fileCleared.connect(self._on_excel_cleared)
 
         row.addWidget(self.drop_zone, 1)
-        row.addWidget(self.excel_drop_zone, 1)
+        row.addWidget(self.manual_test_btn, 0)
         self.body.addLayout(row)
 
     # ------------------------------------------------------------------
@@ -72,17 +59,11 @@ class UploadPanel(Card):
     def current_file(self) -> str | None:
         return self._file_path
 
-    def excel_file(self) -> str | None:
-        return self._excel_path
-
     def flash(self) -> None:
         self.drop_zone.flash()
 
-    def flash_excel(self) -> None:
-        self.excel_drop_zone.flash()
-
     # ------------------------------------------------------------------
-    # 账号 TXT
+    # 文件校验
     # ------------------------------------------------------------------
 
     def _on_file_selected(self, path: str) -> None:
@@ -111,36 +92,3 @@ class UploadPanel(Card):
     def _on_file_cleared(self) -> None:
         self._file_path = None
         self.fileCleared.emit()
-
-    # ------------------------------------------------------------------
-    # 源表格 Excel
-    # ------------------------------------------------------------------
-
-    def _on_excel_selected(self, path: str) -> None:
-        file_path = Path(path)
-        if not file_path.is_file():
-            self.excelRejected.emit(f"文件不存在：{path}", "error")
-            return
-        if file_path.suffix.lower() not in EXCEL_EXTENSIONS:
-            self.excelRejected.emit(
-                "仅支持导入 .xlsx / .xls / .xlsm 表格文件。", "warn"
-            )
-            return
-
-        try:
-            size = file_path.stat().st_size
-        except OSError as exc:
-            self.excelRejected.emit(f"无法读取文件：{exc}", "error")
-            return
-
-        if size > MAX_FILE_SIZE:
-            self.excelRejected.emit("表格文件超过 20 MB，请拆分后再导入。", "warn")
-            return
-
-        self._excel_path = str(file_path)
-        self.excel_drop_zone.set_file(self._excel_path)
-        self.excelLoaded.emit(self._excel_path, size)
-
-    def _on_excel_cleared(self) -> None:
-        self._excel_path = None
-        self.excelCleared.emit()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -21,6 +21,8 @@ from .phrase_row import PhraseRow
 
 
 class PhrasePanel(Card):
+    phrasesChanged = pyqtSignal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(
             "询问话术", "添加回复话术，系统将随机挑选话术中咨询坑位", parent
@@ -94,10 +96,12 @@ class PhrasePanel(Card):
         self._clear_rows()
         for phrase in phrases:
             self.add_phrase(phrase)
+        self.phrasesChanged.emit()
 
     def add_phrase(self, text: str = "") -> PhraseRow:
         row = PhraseRow(text)
         row.activated.connect(self._select_row)
+        row.committed.connect(self._on_row_committed)
         self._rows.append(row)
         self._list_layout.insertWidget(self._list_layout.count() - 1, row)
         self._renumber()
@@ -145,12 +149,16 @@ class PhrasePanel(Card):
         else:
             self.delete_btn.setEnabled(False)
         self._refresh_empty_state()
+        self.phrasesChanged.emit()
 
     def _select_row(self, row: PhraseRow) -> None:
         self._selected = row
         for candidate in self._rows:
             candidate.set_selected(candidate is row)
         self.delete_btn.setEnabled(row is not None)
+
+    def _on_row_committed(self, _row: PhraseRow) -> None:
+        self.phrasesChanged.emit()
 
     def _clear_rows(self) -> None:
         for row in self._rows:

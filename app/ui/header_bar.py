@@ -1,12 +1,22 @@
-"""窗口顶部标题栏。"""
+"""窗口顶部标题栏与飞书登录状态。"""
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ..utils import repolish
 
 
 class HeaderBar(QWidget):
+    feishu_clicked = pyqtSignal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
 
@@ -40,9 +50,20 @@ class HeaderBar(QWidget):
         titles.addLayout(title_row)
         titles.addWidget(description)
 
-        preview_chip = QLabel("螃蟹上号已接入 · 后续步骤开发中")
-        preview_chip.setObjectName("PreviewChip")
+        self.feishu_chip = QPushButton("飞书未登录")
+        self.feishu_chip.setObjectName("FeishuChip")
+        self.feishu_chip.setProperty("state", "offline")
+        self.feishu_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.feishu_chip.setToolTip("点击使用二维码登录飞书，或刷新登录状态")
+        self.feishu_chip.clicked.connect(
+            lambda: self.feishu_clicked.emit()
+        )
 
         layout.addWidget(logo)
         layout.addLayout(titles, 1)
-        layout.addWidget(preview_chip, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.feishu_chip, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def set_feishu_status(self, text: str, state: str) -> None:
+        self.feishu_chip.setText(text)
+        self.feishu_chip.setProperty("state", state)
+        repolish(self.feishu_chip)
