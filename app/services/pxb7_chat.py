@@ -16,14 +16,15 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
-from ..settings import AppSettings
+from ..settings import PROJECT_ROOT, AppSettings
+from .proxy_provider import ProxyEndpoint
 from .pxb7_merchant import resolve_state_path, state_available
 
 LogFn = Callable[[str, str], None]
 
-_CHAT_READY_TIMEOUT = 25.0
-_IMAGE_SEND_TIMEOUT = 10.0
-_CHAT_MESSAGE_TIMEOUT = 5.0
+_CHAT_READY_TIMEOUT = 90.0
+_IMAGE_SEND_TIMEOUT = 30.0
+_CHAT_MESSAGE_TIMEOUT = 15.0
 _MESSAGE_GAP_MIN = 2.0
 _MESSAGE_GAP_MAX = 8.0
 
@@ -57,6 +58,7 @@ class PhoneSession:
     token: str
     user_id: str
     cookies: tuple[dict[str, str], ...] = ()
+    proxy: ProxyEndpoint | None = None
 
 
 class Pxb7ChatService:
@@ -110,20 +112,32 @@ class Pxb7ChatService:
                 self._context.add_cookies(
                     self._session_cookies(self._session)
                 )
+            if self._session is not None and self._session.proxy:
+                self._log(
+                    "聊天浏览器使用代理："
+                    f"{self._session.proxy.display()}",
+                    "info",
+                )
             self._page = self._context.new_page()
-            self._page.set_default_timeout(15000)
+            self._page.set_default_timeout(30000)
             self._page.goto(
                 self._account.recovery_url,
                 wait_until="domcontentloaded",
-                timeout=60000,
+                timeout=90000,
             )
-            self._page.wait_for_timeout(6000)
+            self._page.wait_for_timeout(8000)
             self._ensure_logged_in()
             try:
                 self._page.get_by_text(
                     "咨询商家", exact=True
-                ).first.wait_for(state="visible", timeout=20000)
+                ).first.wait_for(state="visible", timeout=60000)
             except PlaywrightError as exc:
+                self._log_chat_page_state(
+                    self._page, "recovery"
+                )
+                self._save_failure_screenshot(
+                    self._page, "chat_recovery"
+                )
                 raise Pxb7ChatError(
                     "未能打开三角洲行动回收商家列表。"
                 ) from exc
@@ -158,7 +172,7 @@ class Pxb7ChatService:
         card = self._find_merchant_card(merchant_name)
         chat = self._open_chat(card, cancel)
         try:
-            self._wait_chat_ready(chat, cancel)
+            self._wait_chat_ready(chat, cancel, merchant_name)
             baseline = self._left_texts(chat)
 
             if screenshots:
@@ -260,7 +274,7 @@ class Pxb7ChatService:
         self._check_cancel(cancel)
         pages_before = len(self._context.pages)
         try:
-            with self._page.expect_popup(timeout=20000) as page_info:
+            with self._page.expect_popup(timeout=60000) as page_info:
                 button.click()
             chat = page_info.value
         except PlaywrightTimeoutError:
@@ -274,20 +288,29 @@ class Pxb7ChatService:
             ) > pages_before:
                 chat = new_pages[-1]
             else:
-                raise Pxb7ChatError(
-                    "点击「咨询商家」后未打开聊天页面。"
+                self._save_failure_screenshot(
+                    self._page, "chat_popup"
                 )
-        chat.set_default_timeout(15000)
+                raise Pxb7ChatError(
+                    "点击「咨询商家」后 60 秒内未打开聊天页面。"
+                )
+        chat.set_default_timeout(30000)
         try:
             chat.wait_for_load_state(
-                "domcontentloaded", timeout=20000
+                "domcontentloaded", timeout=60000
             )
         except PlaywrightError:
             pass
         return chat
 
-    def _wait_chat_ready(self, chat, cancel: threading.Event) -> None:
+    def _wait_chat_ready(
+        self,
+        chat,
+        cancel: threading.Event,
+        merchant_name: str = "",
+    ) -> None:
         deadline = time.monotonic() + _CHAT_READY_TIMEOUT
+        last_log = time.monotonic()
         while time.monotonic() < deadline:
             self._check_cancel(cancel)
             try:
@@ -295,7 +318,7 @@ class Pxb7ChatService:
                 image_input = chat.locator(
                     "input[type=file][accept='image/*']"
                 )
-                body = chat.locator("body").inner_text(timeout=2000)
+                body = chat.locator("body").inner_text(timeout=3000)
             except PlaywrightError:
                 body = ""
                 panel = None
@@ -309,8 +332,52 @@ class Pxb7ChatService:
                 and "没有数据哦" not in body
             ):
                 return
+            now = time.monotonic()
+            if now - last_log >= 15.0:
+                self._log(
+                    f"{merchant_name or '聊天页'} 仍在加载，"
+                    f"已等待 {int(_CHAT_READY_TIMEOUT - (deadline - now))} 秒…",
+                    "muted",
+                )
+                last_log = now
             chat.wait_for_timeout(1000)
-        raise Pxb7ChatError("螃蟹聊天页面加载超时。")
+
+        self._log_chat_page_state(chat, merchant_name or "chat")
+        self._save_failure_screenshot(
+            chat, f"chat_{merchant_name or 'unknown'}"
+        )
+        raise Pxb7ChatError(
+            "螃蟹聊天界面加载超时（90 秒）。"
+            "请检查代理线路是否过慢或聊天 WebSocket 被代理阻断。"
+        )
+
+    def _log_chat_page_state(self, page, label: str) -> None:
+        try:
+            url = page.url
+        except Exception:
+            url = ""
+        try:
+            body = page.locator("body").inner_text(timeout=3000)
+        except Exception:
+            body = ""
+        preview = " ".join(body.split())[:300]
+        self._log(
+            f"{label} 页面状态：{url}；文本：{preview or '空'}",
+            "warn",
+        )
+
+    @staticmethod
+    def _save_failure_screenshot(page, label: str) -> None:
+        try:
+            output_dir = PROJECT_ROOT / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            safe = re.sub(
+                r"[^\w一-鿿-]+", "_", label
+            )[:40]
+            path = output_dir / f"proxy_chat_failure_{safe}.png"
+            page.screenshot(path=str(path), full_page=False)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # 发送
@@ -568,10 +635,14 @@ class Pxb7ChatService:
 
     def _launch(self, playwright):
         channel = self._account.browser_channel or None
+        kwargs = {
+            "headless": self._account.headless,
+            "channel": channel,
+        }
+        if self._session is not None and self._session.proxy is not None:
+            kwargs["proxy"] = self._session.proxy.as_playwright()
         try:
-            return playwright.chromium.launch(
-                headless=self._account.headless, channel=channel
-            )
+            return playwright.chromium.launch(**kwargs)
         except PlaywrightError:
             if not channel:
                 raise
@@ -579,9 +650,8 @@ class Pxb7ChatService:
                 f"启动浏览器通道 {channel} 失败，尝试 Chromium…",
                 "warn",
             )
-            return playwright.chromium.launch(
-                headless=self._account.headless
-            )
+            kwargs.pop("channel", None)
+            return playwright.chromium.launch(**kwargs)
 
     @staticmethod
     def _session_cookies(session: PhoneSession) -> list[dict[str, str]]:

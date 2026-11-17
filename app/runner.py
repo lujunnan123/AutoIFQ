@@ -31,6 +31,13 @@ from .services.feishu_table import (
     FeishuTableError,
 )
 from .services.phone_parser import mask_phone
+from .services.proxy_provider import (
+    ProxyEndpoint,
+    ProxyPool,
+    ProxySettings,
+    ProxyStore,
+    ProxyStoreError,
+)
 from .services.pxb7_chat import (
     PhoneSession,
     Pxb7ChatCancelled,
@@ -82,6 +89,20 @@ class LoginRunner(QThread):
         self._phone_sessions: dict[str, PhoneSession] = {}
         self._phone_sessions_lock = threading.Lock()
         self._history_store = ConsultHistoryStore()
+        self._proxy_settings = ProxySettings()
+        self._proxy_store_error: str | None = None
+        try:
+            self._proxy_settings = ProxyStore().load()
+        except ProxyStoreError as exc:
+            self._proxy_store_error = str(exc)
+            self._proxy_settings = ProxySettings(
+                enabled=True, api_url="", fetch_count=5, timeout_sec=20.0
+            )
+        self._proxy_pool: ProxyPool | None = None
+        if self._proxy_settings.enabled:
+            self._proxy_pool = ProxyPool(
+                self._proxy_settings, self._log
+            )
 
     # ------------------------------------------------------------------
     # 控制
@@ -118,6 +139,17 @@ class LoginRunner(QThread):
         self._log(
             "流程：先构建表格，构建成功后按线程数展开工作线程。", "info"
         )
+        if self._proxy_store_error:
+            self._log(
+                f"代理设置读取失败：{self._proxy_store_error}", "error"
+            )
+        if self._proxy_settings.enabled:
+            self._log(
+                "子线程代理已启用；飞书和右上角螃蟹商家登录保持直连。",
+                "warn",
+            )
+        else:
+            self._log("子线程代理未启用，子线程将直连。", "muted")
         if self._settings.login.browser_headless:
             self._log(
                 "将通过无头 Playwright 获取易盾 token，登录请求由协议发送。",
@@ -689,7 +721,37 @@ class LoginRunner(QThread):
             self._log(
                 f"线程 {slot} 开始处理 {masked}（{password_type}）", "info"
             )
-            ok, detail, session = self._login_one(slot, account)
+
+            proxy: ProxyEndpoint | None = None
+            if self._proxy_settings.enabled:
+                self._log(
+                    f"线程 {slot} · {masked} 正在获取随机代理…",
+                    "info",
+                )
+                try:
+                    if self._proxy_pool is None:
+                        raise RuntimeError("代理池未初始化")
+                    proxy = self._proxy_pool.acquire()
+                except Exception as exc:
+                    message = f"代理获取失败：{exc}"
+                    self._log(
+                        f"线程 {slot} · {masked} {message}，"
+                        "跳过该账号，不使用直连。",
+                        "error",
+                    )
+                    with results_lock:
+                        results.append(False)
+                    self.thread_finished.emit(slot, False, message)
+                    continue
+                self._log(
+                    f"线程 {slot} · {masked} 使用代理："
+                    f"{proxy.display()}",
+                    "info",
+                )
+
+            ok, detail, session = self._login_one(
+                slot, account, proxy
+            )
             with results_lock:
                 results.append(ok)
             if ok and session is not None:
@@ -698,7 +760,10 @@ class LoginRunner(QThread):
             self.thread_finished.emit(slot, ok, detail)
 
     def _login_one(
-        self, slot: int, account: Account
+        self,
+        slot: int,
+        account: Account,
+        proxy: ProxyEndpoint | None = None,
     ) -> tuple[bool, str, PhoneSession | None]:
         masked = mask_phone(account.phone)
 
@@ -707,12 +772,19 @@ class LoginRunner(QThread):
         )
         try:
             token, cookies = self._token_provider.capture(
-                account.phone, account.password, self._cancel
+                account.phone,
+                account.password,
+                self._cancel,
+                proxy=proxy,
             )
             self.thread_step.emit(
                 slot, 0, 55.0, StepStatus.RUNNING, "正在协议密码登录…"
             )
-            client = Pxb7Client(self._settings.pxb7, account.phone)
+            client = Pxb7Client(
+                self._settings.pxb7,
+                account.phone,
+                proxy=proxy,
+            )
             client.load_cookies(cookies)
             result = client.login_with_password(
                 account.phone, account.password, token
@@ -763,7 +835,12 @@ class LoginRunner(QThread):
             self._log(f"线程 {slot} · {masked} {result.warning}", "warn")
 
         session = self._build_phone_session(
-            account.phone, result.token, result.user_id, cookies, client
+            account.phone,
+            result.token,
+            result.user_id,
+            cookies,
+            client,
+            proxy,
         )
         if session is None:
             self._log(
@@ -785,6 +862,7 @@ class LoginRunner(QThread):
         user_id: str,
         browser_cookies: list[dict],
         client: Pxb7Client,
+        proxy: ProxyEndpoint | None = None,
     ) -> PhoneSession | None:
         if not token:
             return None
@@ -808,6 +886,7 @@ class LoginRunner(QThread):
             token=token,
             user_id=user_id,
             cookies=tuple(cookies),
+            proxy=proxy,
         )
 
     def _log(self, message: str, level: str = "info") -> None:

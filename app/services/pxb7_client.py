@@ -10,6 +10,7 @@ from typing import Any
 import requests
 
 from ..settings import Pxb7Settings
+from .proxy_provider import ProxyEndpoint
 
 try:
     from cryptography.hazmat.primitives import serialization
@@ -56,10 +57,17 @@ class Pxb7LoginResult:
 class Pxb7Client:
     """一个实例对应一个手机号的一次登录会话。"""
 
-    def __init__(self, config: Pxb7Settings, phone: str) -> None:
+    def __init__(
+        self,
+        config: Pxb7Settings,
+        phone: str,
+        proxy: ProxyEndpoint | None = None,
+    ) -> None:
         self._config = config
         self._phone = phone
+        self._proxy = proxy
         self._session = requests.Session()
+        self._session.trust_env = False
         self._device_id = uuid.uuid5(
             uuid.NAMESPACE_URL, f"autoifq:{phone}"
         ).hex
@@ -270,12 +278,18 @@ class Pxb7Client:
         if extra_headers:
             headers.update(extra_headers)
 
+        proxies = (
+            self._proxy.requests_proxies()
+            if self._proxy is not None
+            else None
+        )
         try:
             response = self._session.post(
                 url,
                 json=payload,
                 headers=headers,
                 timeout=self._config.request_timeout,
+                proxies=proxies,
             )
         except requests.RequestException as exc:
             raise Pxb7NetworkError(f"网络异常：{exc}") from exc

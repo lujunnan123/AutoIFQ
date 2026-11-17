@@ -14,8 +14,9 @@ import time
 from collections.abc import Callable
 from urllib.parse import quote
 
-from ..settings import LoginSettings, Pxb7Settings
+from ..settings import PROJECT_ROOT, LoginSettings, Pxb7Settings
 from .phone_parser import mask_phone
+from .proxy_provider import ProxyEndpoint
 from .pxb7_client import Pxb7Error
 
 try:
@@ -52,6 +53,7 @@ class Pxb7BrowserYdTokenProvider:
         phone: str,
         password: str,
         cancel: threading.Event | None = None,
+        proxy: ProxyEndpoint | None = None,
     ) -> tuple[str, list[dict]]:
         """返回 (ydToken, browser_cookies)。"""
         cancel = cancel or threading.Event()
@@ -63,7 +65,7 @@ class Pxb7BrowserYdTokenProvider:
         if not self._acquire_lock(cancel):
             raise Pxb7Error("已取消")
         try:
-            return self._capture_locked(phone, password, cancel)
+            return self._capture_locked(phone, password, cancel, proxy)
         finally:
             _TOKEN_LOCK.release()
 
@@ -74,7 +76,11 @@ class Pxb7BrowserYdTokenProvider:
         return True
 
     def _capture_locked(
-        self, phone: str, password: str, cancel: threading.Event
+        self,
+        phone: str,
+        password: str,
+        cancel: threading.Event,
+        proxy: ProxyEndpoint | None = None,
     ) -> tuple[str, list[dict]]:
         masked = mask_phone(phone)
         if self._login.browser_headless:
@@ -90,7 +96,7 @@ class Pxb7BrowserYdTokenProvider:
 
         try:
             with sync_playwright() as playwright:
-                browser = self._launch(playwright)
+                browser = self._launch(playwright, proxy)
                 try:
                     context = browser.new_context(
                         locale="zh-CN",
@@ -121,8 +127,7 @@ class Pxb7BrowserYdTokenProvider:
                         wait_until="domcontentloaded",
                         timeout=60000,
                     )
-                    page.wait_for_timeout(1500)
-                    page.get_by_text("密码登录", exact=True).first.click()
+                    self._open_password_login(page, masked)
                     page.wait_for_timeout(500)
                     page.get_by_placeholder("请输入账号").first.fill(phone)
                     page.get_by_placeholder("请输入密码").first.fill(password)
@@ -143,7 +148,17 @@ class Pxb7BrowserYdTokenProvider:
                             "warn",
                         )
 
-                    deadline = time.monotonic() + self._login.browser_timeout
+                    browser_timeout = self._login.browser_timeout
+                    if proxy is not None:
+                        browser_timeout = max(
+                            browser_timeout, 300.0
+                        )
+                        self._log(
+                            f"{masked} 使用代理时易盾验证较慢，"
+                            f"等待上限延长到 {int(browser_timeout)} 秒。",
+                            "muted",
+                        )
+                    deadline = time.monotonic() + browser_timeout
                     while time.monotonic() < deadline:
                         if cancel.is_set():
                             raise Pxb7Error("已取消")
@@ -180,13 +195,89 @@ class Pxb7BrowserYdTokenProvider:
         except PlaywrightError as exc:
             raise Pxb7Error(f"浏览器操作失败：{exc}") from exc
 
-    def _launch(self, playwright):
-        channel = self._login.browser_channel or None
+    def _open_password_login(self, page, masked: str) -> None:
+        page.wait_for_timeout(1500)
+        for attempt in range(2):
+            if self._click_password_tab(page):
+                return
+            if attempt == 0:
+                self._log(
+                    f"{masked} 登录页暂未加载，刷新页面后重试…",
+                    "warn",
+                )
+                try:
+                    page.reload(
+                        wait_until="domcontentloaded",
+                        timeout=60000,
+                    )
+                    page.wait_for_timeout(2500)
+                except PlaywrightError as exc:
+                    self._log(
+                        f"{masked} 刷新登录页失败：{exc}", "warn"
+                    )
+
+        self._log(
+            f"{masked} 未找到「密码登录」入口，"
+            f"当前页面：{page.url}",
+            "error",
+        )
         try:
-            return playwright.chromium.launch(
-                headless=self._login.browser_headless,
-                channel=channel,
+            body = page.locator("body").inner_text(timeout=3000)
+            preview = " ".join(body.split())[:300]
+            self._log(f"登录页文本：{preview}", "muted")
+        except Exception:
+            pass
+        self._save_login_failure_screenshot(page, masked)
+        raise Pxb7Error(
+            "代理网络下登录页未加载出「密码登录」入口，"
+            "可能是代理较慢、代理不可达或触发了页面验证。"
+            "请更换代理后重试；失败截图已保存到 output 目录。"
+        )
+
+    def _click_password_tab(self, page) -> bool:
+        try:
+            locator = page.get_by_text("密码登录", exact=True)
+            locator.first.wait_for(
+                state="visible", timeout=30000
             )
+        except PlaywrightError:
+            locator = page.get_by_text("密码登录", exact=False)
+        try:
+            count = min(locator.count(), 5)
+        except PlaywrightError:
+            return False
+        for index in range(count):
+            element = locator.nth(index)
+            try:
+                if not element.is_visible():
+                    continue
+                element.click(timeout=5000)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _save_login_failure_screenshot(self, page, masked: str) -> None:
+        try:
+            output_dir = PROJECT_ROOT / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            safe_masked = masked.replace("*", "x")
+            path = output_dir / f"proxy_login_failure_{safe_masked}.png"
+            page.screenshot(path=str(path), full_page=False)
+            self._log(f"登录失败截图：{path}", "warn")
+        except Exception as exc:
+            self._log(f"保存登录失败截图失败：{exc}", "warn")
+
+    def _launch(self, playwright, proxy: ProxyEndpoint | None = None):
+        channel = self._login.browser_channel or None
+        kwargs = {
+            "headless": self._login.browser_headless,
+            "channel": channel,
+        }
+        if proxy is not None:
+            kwargs["proxy"] = proxy.as_playwright()
+        try:
+            return playwright.chromium.launch(**kwargs)
         except PlaywrightError as exc:
             if not channel:
                 raise
@@ -194,6 +285,5 @@ class Pxb7BrowserYdTokenProvider:
                 f"启动浏览器通道 {channel} 失败（{exc}），尝试 Playwright Chromium…",
                 "warn",
             )
-            return playwright.chromium.launch(
-                headless=self._login.browser_headless
-            )
+            kwargs.pop("channel", None)
+            return playwright.chromium.launch(**kwargs)

@@ -42,6 +42,7 @@ from .manual_test_window import ManualTestWindow
 from .parameter_panel import ParameterPanel
 from .phrase_panel import PhrasePanel
 from .progress_panel import ProgressPanel
+from .proxy_settings_dialog import ProxySettingsDialog
 from .upload_panel import UploadPanel
 
 
@@ -232,6 +233,9 @@ class MainWindow(QMainWindow):
         self.parameter_panel.valuesChanged.connect(self._save_parameters)
         self.parameter_panel.merchantsChanged.connect(
             self._save_merchant_cache
+        )
+        self.parameter_panel.proxySettingsRequested.connect(
+            self._open_proxy_settings
         )
 
     # ------------------------------------------------------------------
@@ -509,6 +513,41 @@ class MainWindow(QMainWindow):
         self._pxb7_login_runner = None
         if runner is not None:
             runner.deleteLater()
+
+    # ------------------------------------------------------------------
+    # 代理设置
+    # ------------------------------------------------------------------
+
+    def _open_proxy_settings(self) -> None:
+        if (
+            self.runner is not None
+            and self.runner.isRunning()
+        ) or (
+            self._feishu_login_runner is not None
+            and self._feishu_login_runner.isRunning()
+        ) or (
+            self._pxb7_login_runner is not None
+            and self._pxb7_login_runner.isRunning()
+        ):
+            self.log("请停止当前任务或登录流程后再修改代理设置。", "warn")
+            return
+
+        dialog = ProxySettingsDialog(self)
+        if dialog.exec() and dialog.saved_settings is not None:
+            settings = dialog.saved_settings
+            if settings.enabled:
+                self.log(
+                    "代理设置已保存：子线程将使用随机代理；"
+                    "飞书和螃蟹商家登录保持直连。",
+                    "info",
+                )
+                self.set_status("代理已启用 · 下次运行子线程使用随机代理")
+            else:
+                self.log(
+                    "代理设置已保存：子线程代理未启用，将直连。",
+                    "warn",
+                )
+                self.set_status("代理未启用 · 子线程将直连")
 
     # ------------------------------------------------------------------
     # 询问话术持久化

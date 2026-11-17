@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSpinBox,
     QWidget,
 )
@@ -24,9 +25,21 @@ from .merchant_selector import MerchantSelector
 class ParameterPanel(Card):
     valuesChanged = pyqtSignal()
     merchantsChanged = pyqtSignal()
+    proxySettingsRequested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("运行参数", "线程、间隔与咨询商家", parent)
+
+        self.proxy_btn = QPushButton("代理设置")
+        self.proxy_btn.setObjectName("Ghost")
+        self.proxy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.proxy_btn.setToolTip(
+            "配置子线程使用的随机代理；飞书与商家登录保持直连"
+        )
+        self.proxy_btn.clicked.connect(
+            lambda: self.proxySettingsRequested.emit()
+        )
+        self.add_header_widget(self.proxy_btn)
 
         self._spins: dict[str, QSpinBox | QDoubleSpinBox] = {}
         self._saved_labels: dict[str, QLabel] = {}

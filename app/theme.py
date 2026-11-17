@@ -569,6 +569,57 @@ QPushButton#ManualTestButton:pressed {
     background-color: #0b121a;
 }
 
+/* ---------- 代理设置 ---------- */
+QDialog#ProxySettingsDialog {
+    background-color: #0b1017;
+}
+QLineEdit#ProxyUrlEdit {
+    background-color: #0b121b;
+    border: 1px solid #223043;
+    border-radius: 8px;
+    padding: 6px 10px;
+    color: #dbe6f3;
+    font-size: 12px;
+    selection-background-color: #2f6fd0;
+    selection-color: #ffffff;
+}
+QLineEdit#ProxyUrlEdit:focus {
+    border-color: #3f84ff;
+    background-color: #0c141f;
+}
+QPlainTextEdit#ProxyResult {
+    background-color: #0a1018;
+    border: 1px solid #1b2634;
+    border-radius: 10px;
+    padding: 8px;
+    color: #93a7bd;
+    font-family: "Cascadia Mono", "Consolas", "Microsoft YaHei UI";
+    font-size: 11px;
+    selection-background-color: #264a78;
+    selection-color: #ffffff;
+}
+QCheckBox#ProxyCheck {
+    color: #c6d5e6;
+    font-size: 12px;
+    spacing: 8px;
+    background: transparent;
+}
+QCheckBox#ProxyCheck::indicator {
+    width: 15px;
+    height: 15px;
+    border: 1px solid #2d4058;
+    border-radius: 4px;
+    background-color: #0b121b;
+}
+QCheckBox#ProxyCheck::indicator:checked {
+    background-color: #3f84ff;
+    border-color: #3f84ff;
+}
+QLabel#ProxyStatus {
+    color: #8fa2b8;
+    font-size: 11px;
+}
+
 /* ---------- 手动测试窗口 ---------- */
 QDialog#ManualTestWindow {
     background-color: #0b1017;
