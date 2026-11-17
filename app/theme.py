@@ -552,7 +552,7 @@ QPushButton#GhostDanger:disabled {
     background-color: transparent;
     border-color: #2a1c21;
 }
-QPushButton#ManualTestButton {
+QPushButton#ManualInquiryButton {
     background-color: #0d141d;
     border: 1px dashed #2c4058;
     border-radius: 12px;
@@ -560,12 +560,12 @@ QPushButton#ManualTestButton {
     font-size: 13px;
     font-weight: 700;
 }
-QPushButton#ManualTestButton:hover {
+QPushButton#ManualInquiryButton:hover {
     background-color: #0f1723;
     border-color: #3f84ff;
     color: #cfe3ff;
 }
-QPushButton#ManualTestButton:pressed {
+QPushButton#ManualInquiryButton:pressed {
     background-color: #0b121a;
 }
 
@@ -620,16 +620,109 @@ QLabel#ProxyStatus {
     font-size: 11px;
 }
 
-/* ---------- 手动测试窗口 ---------- */
-QDialog#ManualTestWindow {
+/* ---------- 手动询价窗口 ---------- */
+QDialog#ManualInquiryWindow {
     background-color: #0b1017;
 }
-QLabel#ManualTestPlaceholder {
-    color: #5b6d82;
+QComboBox#ManualMerchant {
+    background-color: #0b121b;
+    border: 1px solid #223043;
+    border-radius: 8px;
+    padding: 5px 10px;
+    color: #dbe6f3;
+    font-size: 12px;
+}
+QComboBox#ManualMerchant:hover {
+    border-color: #2d4058;
+}
+QComboBox#ManualMerchant:focus {
+    border-color: #3f84ff;
+}
+QComboBox#ManualMerchant:disabled {
+    color: #55657a;
+    background-color: #101720;
+}
+QComboBox#ManualMerchant::drop-down {
+    border: none;
+    width: 24px;
+}
+QComboBox#ManualMerchant QAbstractItemView {
+    background-color: #111823;
+    border: 1px solid #223043;
+    color: #dbe6f3;
+    selection-background-color: #2f6fd0;
+    selection-color: #ffffff;
+    outline: 0;
+    padding: 4px;
+}
+QLabel#ManualImagePreview {
     background-color: #0d141d;
     border: 1px dashed #27364a;
-    border-radius: 12px;
-    font-size: 13px;
+    border-radius: 10px;
+    color: #5b6d82;
+    font-size: 11px;
+}
+QFrame#ImageDropArea {
+    background-color: #0d141d;
+    border: 1px dashed #27364a;
+    border-radius: 10px;
+}
+QFrame#ImageDropArea:hover {
+    border-color: #365072;
+    background-color: #0f1723;
+}
+QFrame#ImageDropArea[dragActive="true"] {
+    border: 1px solid #3f84ff;
+    background-color: rgba(63, 132, 255, 26);
+}
+QLabel#GhostStrongText {
+    color: #9dc5ff;
+    font-size: 12px;
+    font-weight: 600;
+}
+QListWidget#ManualImageList {
+    background-color: #0b121b;
+    border: 1px solid #1b2634;
+    border-radius: 9px;
+    padding: 4px;
+    color: #c6d5e6;
+    font-size: 11px;
+}
+QListWidget#ManualImageList::item {
+    color: #c6d5e6;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    padding: 4px;
+}
+QListWidget#ManualImageList::item:hover {
+    background-color: #0f1723;
+    border-color: #223043;
+}
+QListWidget#ManualImageList::item:selected {
+    background-color: rgba(63, 132, 255, 34);
+    border-color: #3f84ff;
+    color: #ffffff;
+}
+QTableWidget#ManualQuoteTable {
+    background-color: #0b121b;
+    border: 1px solid #1b2634;
+    border-radius: 9px;
+    color: #dce6f3;
+    font-size: 12px;
+    gridline-color: #1b2634;
+}
+QTableWidget#ManualQuoteTable::item {
+    padding: 6px 8px;
+    border-bottom: 1px solid #1b2634;
+}
+QTableWidget#ManualQuoteTable QHeaderView::section {
+    background-color: #111823;
+    color: #91a3b9;
+    border: none;
+    border-bottom: 1px solid #223043;
+    padding: 6px 8px;
+    font-size: 11px;
+    font-weight: 600;
 }
 
 /* ---------- 询问话术列表 ---------- */

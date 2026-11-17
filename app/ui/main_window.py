@@ -38,7 +38,7 @@ from ..utils import fmt_size
 from .action_panel import ActionPanel
 from .header_bar import HeaderBar
 from .log_panel import LogPanel
-from .manual_test_window import ManualTestWindow
+from .manual_inquiry_window import ManualInquiryWindow
 from .parameter_panel import ParameterPanel
 from .phrase_panel import PhrasePanel
 from .progress_panel import ProgressPanel
@@ -66,7 +66,7 @@ class MainWindow(QMainWindow):
         self.parameter_panel = ParameterPanel()
         self.phrase_panel = PhrasePanel()
         self.action_panel = ActionPanel()
-        self._manual_test_window: ManualTestWindow | None = None
+        self._manual_inquiry_window: ManualInquiryWindow | None = None
         self._feishu_login_runner: FeishuLoginRunner | None = None
         self._pxb7_login_runner: Pxb7LoginRunner | None = None
         self._pxb7_ready = False
@@ -219,8 +219,8 @@ class MainWindow(QMainWindow):
         self.upload_panel.fileLoaded.connect(self._on_file_loaded)
         self.upload_panel.fileRejected.connect(self._on_file_rejected)
         self.upload_panel.fileCleared.connect(self._on_file_cleared)
-        self.upload_panel.manualTestRequested.connect(
-            self._open_manual_test
+        self.upload_panel.manualInquiryRequested.connect(
+            self._open_manual_inquiry
         )
         self.header.feishu_clicked.connect(self._start_feishu_login)
         self.header.pxb7_clicked.connect(self._start_pxb7_login)
@@ -308,22 +308,49 @@ class MainWindow(QMainWindow):
         self.set_status("就绪 · 等待导入账号清单")
 
     # ------------------------------------------------------------------
-    # 手动测试
+    # 手动询价
     # ------------------------------------------------------------------
 
-    def _open_manual_test(self) -> None:
-        if self._manual_test_window is not None:
-            self._manual_test_window.raise_()
-            self._manual_test_window.activateWindow()
+    def _open_manual_inquiry(self) -> None:
+        if self._manual_inquiry_window is not None:
+            self._manual_inquiry_window.raise_()
+            self._manual_inquiry_window.activateWindow()
             return
 
-        window = ManualTestWindow(self)
-        window.destroyed.connect(
-            lambda: setattr(self, "_manual_test_window", None)
+        window = ManualInquiryWindow(
+            self,
+            merchant_provider=self.parameter_panel.merchants,
+            selected_merchant_provider=(
+                self.parameter_panel.selected_merchants
+            ),
+            params_provider=self.collect_params,
+            account_file_provider=self.upload_panel.current_file,
         )
-        self._manual_test_window = window
+        window.destroyed.connect(
+            lambda: setattr(self, "_manual_inquiry_window", None)
+        )
+        window.merchantSelectionChanged.connect(
+            self._on_manual_merchant_selection_changed
+        )
+        self.parameter_panel.merchantsChanged.connect(
+            window.sync_merchants_from_main
+        )
+        self._manual_inquiry_window = window
         window.show()
-        self.log("已打开手动测试界面。", "info")
+        self.log("已打开手动询价界面。", "info")
+
+    def _on_manual_merchant_selection_changed(self) -> None:
+        window = self._manual_inquiry_window
+        if window is None:
+            return
+        selected = window.selected_merchants()
+        if set(selected) == set(
+            self.parameter_panel.selected_merchants()
+        ):
+            return
+        self.parameter_panel.set_merchants(
+            self.parameter_panel.merchants(), selected
+        )
 
     # ------------------------------------------------------------------
     # 飞书登录
@@ -941,6 +968,11 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._save_phrases()
         self._save_parameters()
+        if self._manual_inquiry_window is not None:
+            if self._manual_inquiry_window.is_busy():
+                self._manual_inquiry_window.shutdown()
+            else:
+                self._manual_inquiry_window.cleanup()
         if self.runner is not None and self.runner.isRunning():
             self.runner.cancel()
             self.runner.wait(35000)

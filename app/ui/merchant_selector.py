@@ -20,7 +20,12 @@ from PyQt6.QtWidgets import (
 class MerchantSelector(QWidget):
     selectionChanged = pyqtSignal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        title: str = "咨询商家",
+    ) -> None:
         super().__init__(parent)
         self._merchants: list[str] = []
         self._checks: list[QCheckBox] = []
@@ -33,8 +38,8 @@ class MerchantSelector(QWidget):
         header = QHBoxLayout()
         header.setSpacing(6)
 
-        title = QLabel("咨询商家")
-        title.setObjectName("FieldLabel")
+        title_label = QLabel(title)
+        title_label.setObjectName("FieldLabel")
 
         self.summary_label = QLabel("尚未获取商家")
         self.summary_label.setObjectName("MerchantSummary")
@@ -53,7 +58,7 @@ class MerchantSelector(QWidget):
         self.clear_btn.setEnabled(False)
         self.clear_btn.clicked.connect(self._clear_selection)
 
-        header.addWidget(title)
+        header.addWidget(title_label)
         header.addWidget(self.summary_label)
         header.addStretch(1)
         header.addWidget(self.select_all_btn)

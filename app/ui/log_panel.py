@@ -13,8 +13,14 @@ from .card import Card
 
 
 class LogPanel(Card):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("运行日志", "实时输出每一步的执行信息", parent)
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        title: str = "运行日志",
+        subtitle: str = "实时输出每一步的执行信息",
+    ) -> None:
+        super().__init__(title, subtitle, parent)
 
         clear_button = QPushButton("清空")
         clear_button.setObjectName("Ghost")

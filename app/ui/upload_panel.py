@@ -1,4 +1,4 @@
-"""账号清单上传卡片，以及手动测试入口。"""
+"""账号清单上传卡片，以及手动询价入口。"""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ class UploadPanel(Card):
     fileLoaded = pyqtSignal(str, int)
     fileRejected = pyqtSignal(str, str)
     fileCleared = pyqtSignal()
-    manualTestRequested = pyqtSignal()
+    manualInquiryRequested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(
@@ -39,17 +39,19 @@ class UploadPanel(Card):
         self.drop_zone.fileSelected.connect(self._on_file_selected)
         self.drop_zone.fileCleared.connect(self._on_file_cleared)
 
-        self.manual_test_btn = QPushButton("手动测试")
-        self.manual_test_btn.setObjectName("ManualTestButton")
-        self.manual_test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.manual_test_btn.setFixedSize(140, 108)
-        self.manual_test_btn.setToolTip("打开手动测试界面")
-        self.manual_test_btn.clicked.connect(
-            lambda: self.manualTestRequested.emit()
+        self.manual_inquiry_btn = QPushButton("手动询价")
+        self.manual_inquiry_btn.setObjectName("ManualInquiryButton")
+        self.manual_inquiry_btn.setCursor(
+            Qt.CursorShape.PointingHandCursor
+        )
+        self.manual_inquiry_btn.setFixedSize(140, 108)
+        self.manual_inquiry_btn.setToolTip("打开手动询价界面")
+        self.manual_inquiry_btn.clicked.connect(
+            lambda: self.manualInquiryRequested.emit()
         )
 
         row.addWidget(self.drop_zone, 1)
-        row.addWidget(self.manual_test_btn, 0)
+        row.addWidget(self.manual_inquiry_btn, 0)
         self.body.addLayout(row)
 
     # ------------------------------------------------------------------
