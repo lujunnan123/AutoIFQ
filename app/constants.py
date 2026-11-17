@@ -72,10 +72,6 @@ PARAMETER_FIELDS: tuple[SpinFieldSpec, ...] = (
         "相邻操作之间的等待间隔", decimals=1, step=0.5,
     ),
     SpinFieldSpec(
-        "merchant_count", "咨询商家数量", 1, 999, 20, " 家",
-        "每个商品需要咨询的商家数量",
-    ),
-    SpinFieldSpec(
         "timeout_sec", "单次超时", 10, 600, 90, " 秒",
         "单次对话等待回复的最长时间",
     ),

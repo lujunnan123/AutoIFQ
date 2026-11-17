@@ -160,6 +160,24 @@ class Pxb7Client:
             warning=warning,
         )
 
+    def session_cookies(self) -> list[dict[str, str]]:
+        """返回协议登录会话中与 pxb7 相关的 cookie（不含登录 token）。"""
+        cookies: list[dict[str, str]] = []
+        for cookie in self._session.cookies:
+            domain = str(cookie.domain or "")
+            name = str(cookie.name or "")
+            if "pxb7.com" not in domain or not name:
+                continue
+            cookies.append(
+                {
+                    "name": name,
+                    "value": str(cookie.value or ""),
+                    "domain": domain,
+                    "path": str(cookie.path or "/"),
+                }
+            )
+        return cookies
+
     def load_cookies(self, cookies: list[dict[str, Any]]) -> None:
         """复制浏览器上下文中的 pxb7 cookie，供后续 token 换取使用。"""
         for cookie in cookies:

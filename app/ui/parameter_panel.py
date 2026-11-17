@@ -18,13 +18,15 @@ from ..constants import PARAMETER_FIELDS, SpinFieldSpec
 from ..models import RunParams
 from .card import Card
 from .click_outside import ClickOutsideFilter
+from .merchant_selector import MerchantSelector
 
 
 class ParameterPanel(Card):
     valuesChanged = pyqtSignal()
+    merchantsChanged = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("运行参数", "线程、间隔与询价范围", parent)
+        super().__init__("运行参数", "线程、间隔与咨询商家", parent)
 
         self._spins: dict[str, QSpinBox | QDoubleSpinBox] = {}
         self._saved_labels: dict[str, QLabel] = {}
@@ -79,7 +81,15 @@ class ParameterPanel(Card):
 
         self.body.addLayout(form)
 
-        hint = QLabel("线程数用于螃蟹上号；其余参数将在后续步骤接入后生效。")
+        self.merchant_selector = MerchantSelector()
+        self.merchant_selector.selectionChanged.connect(
+            lambda: self.merchantsChanged.emit()
+        )
+        self.body.addWidget(self.merchant_selector)
+
+        hint = QLabel(
+            "咨询商家需先登录螃蟹账号获取；线程数用于螃蟹上号。"
+        )
         hint.setObjectName("HintLabel")
         self.body.addWidget(hint)
 
@@ -99,11 +109,24 @@ class ParameterPanel(Card):
         return RunParams(
             threads=int(values["threads"]),
             interval_sec=float(values["interval_sec"]),
-            merchant_count=int(values["merchant_count"]),
             timeout_sec=int(values["timeout_sec"]),
             retries=int(values["retries"]),
+            merchants=self.selected_merchants(),
             phrases=phrases,
         )
+
+    # ------------------------------------------------------------------
+    # 咨询商家
+    # ------------------------------------------------------------------
+
+    def set_merchants(self, merchants, selected=()) -> None:
+        self.merchant_selector.set_merchants(merchants, selected)
+
+    def merchants(self) -> tuple[str, ...]:
+        return self.merchant_selector.merchants()
+
+    def selected_merchants(self) -> tuple[str, ...]:
+        return self.merchant_selector.selected_merchants()
 
     def values(self) -> dict[str, int | float]:
         """读取当前参数，并先确认输入框内未提交的文本。"""

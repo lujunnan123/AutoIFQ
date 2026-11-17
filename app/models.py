@@ -19,14 +19,15 @@ class RunParams:
 
     threads: int
     interval_sec: float
-    merchant_count: int
     timeout_sec: int
     retries: int
+    merchants: tuple[str, ...]
     phrases: tuple[str, ...]
 
     def summary(self) -> str:
         return (
             f"线程 {self.threads} · 间隔 {self.interval_sec:.1f}s · "
-            f"目标商家 {self.merchant_count} 家 · 超时 {self.timeout_sec}s · "
-            f"重试 {self.retries} 次 · 询问话术 {len(self.phrases)} 条"
+            f"咨询商家 {len(self.merchants)} 家 · "
+            f"超时 {self.timeout_sec}s · 重试 {self.retries} 次 · "
+            f"询问话术 {len(self.phrases)} 条"
         )

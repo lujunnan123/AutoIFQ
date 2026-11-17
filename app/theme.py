@@ -91,38 +91,40 @@ QLabel#AppSub {
     color: #687b91;
     font-size: 11px;
 }
-QPushButton#FeishuChip {
+QPushButton#FeishuChip, QPushButton#Pxb7Chip {
     border-radius: 10px;
     padding: 6px 14px;
     font-size: 11px;
     font-weight: 700;
 }
-QPushButton#FeishuChip[state="offline"] {
+QPushButton#FeishuChip[state="offline"], QPushButton#Pxb7Chip[state="offline"] {
     color: #93a4ba;
     background-color: rgba(147, 164, 186, 18);
     border: 1px solid rgba(147, 164, 186, 55);
 }
-QPushButton#FeishuChip[state="offline"]:hover {
+QPushButton#FeishuChip[state="offline"]:hover,
+QPushButton#Pxb7Chip[state="offline"]:hover {
     color: #c7d5e6;
     background-color: rgba(147, 164, 186, 32);
     border-color: rgba(147, 164, 186, 90);
 }
-QPushButton#FeishuChip[state="logging"] {
+QPushButton#FeishuChip[state="logging"], QPushButton#Pxb7Chip[state="logging"] {
     color: #79b4ff;
     background-color: rgba(63, 132, 255, 28);
     border: 1px solid rgba(63, 132, 255, 90);
 }
-QPushButton#FeishuChip[state="online"] {
+QPushButton#FeishuChip[state="online"], QPushButton#Pxb7Chip[state="online"] {
     color: #45e0a8;
     background-color: rgba(46, 204, 143, 24);
     border: 1px solid rgba(46, 204, 143, 72);
 }
-QPushButton#FeishuChip[state="online"]:hover {
+QPushButton#FeishuChip[state="online"]:hover,
+QPushButton#Pxb7Chip[state="online"]:hover {
     color: #7cf0c4;
     background-color: rgba(46, 204, 143, 36);
     border-color: rgba(46, 204, 143, 105);
 }
-QPushButton#FeishuChip[state="error"] {
+QPushButton#FeishuChip[state="error"], QPushButton#Pxb7Chip[state="error"] {
     color: #ff8b9c;
     background-color: rgba(255, 93, 115, 24);
     border: 1px solid rgba(255, 93, 115, 72);
@@ -622,6 +624,54 @@ QLabel#PhraseSaved {
 QLabel#PhraseEmpty {
     color: #5b6d82;
     font-size: 11px;
+}
+
+/* ---------- 咨询商家多选 ---------- */
+QLabel#MerchantSummary {
+    color: #8fa2b8;
+    font-size: 11px;
+}
+QScrollArea#MerchantScroll,
+QWidget#MerchantViewport,
+QWidget#MerchantList {
+    background: transparent;
+    border: none;
+}
+QCheckBox#MerchantCheck {
+    color: #c6d5e6;
+    font-size: 12px;
+    spacing: 8px;
+    background: transparent;
+    padding: 3px 2px;
+}
+QCheckBox#MerchantCheck:hover {
+    color: #eaf3ff;
+}
+QCheckBox#MerchantCheck::indicator {
+    width: 15px;
+    height: 15px;
+    border: 1px solid #2d4058;
+    border-radius: 4px;
+    background-color: #0b121b;
+}
+QCheckBox#MerchantCheck::indicator:hover {
+    border-color: #3f84ff;
+}
+QCheckBox#MerchantCheck::indicator:checked {
+    background-color: #3f84ff;
+    border-color: #3f84ff;
+}
+QLabel#MerchantEmpty {
+    color: #5b6d82;
+    font-size: 11px;
+}
+
+/* ---------- 右侧滚动区 ---------- */
+QScrollArea#SideScroll,
+QWidget#SideScrollViewport,
+QWidget#SideScrollContent {
+    background: transparent;
+    border: none;
 }
 
 /* ---------- 进度条 ---------- */

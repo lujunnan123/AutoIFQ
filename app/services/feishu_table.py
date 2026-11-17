@@ -5,9 +5,11 @@ from __future__ import annotations
 import base64
 import gzip
 import json
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
@@ -43,6 +45,16 @@ _TIMEZONE_OFFSETS = {
     "Asia/Taipei": 8,
     "Asia/Singapore": 8,
 }
+_SCREENSHOT_FIELD_ALIASES = ("账号内容图片",)
+_MAX_SCREENSHOTS_PER_RECORD = 10
+
+
+@dataclass(frozen=True)
+class FeishuRecord:
+    record_id: str
+    values: tuple[object, ...]
+    account: str
+    screenshots: tuple[Path, ...] = ()
 
 
 class FeishuTableError(Exception):
@@ -60,6 +72,8 @@ class FeishuTableData:
     source_name: str
     page_url: str
     headers: tuple[str, ...] = REQUIRED_COLUMNS
+    records: tuple[FeishuRecord, ...] = ()
+    temp_dir: Path | None = None
 
 
 class FeishuTableClient:
@@ -191,7 +205,7 @@ class FeishuTableClient:
                     self._raise_for_unloaded_page(page)
 
                 timezone_name = captured.get("timezone")
-                rows, total = self._extract_rows(
+                rows, total, selected_ids = self._extract_rows(
                     table,
                     limit,
                     timezone_name=(
@@ -204,6 +218,10 @@ class FeishuTableClient:
                     raise FeishuTableError(
                         "飞书表格当前视图没有可读取的记录。"
                     )
+
+                records, temp_dir = self._download_records(
+                    context, table, selected_ids, rows
+                )
 
                 try:
                     context.storage_state(path=str(self._state_path))
@@ -236,6 +254,8 @@ class FeishuTableClient:
                     source_name=source_name,
                     page_url=page.url,
                     headers=REQUIRED_COLUMNS,
+                    records=tuple(records),
+                    temp_dir=temp_dir,
                 )
         except PlaywrightTimeoutError as exc:
             raise FeishuTableError(
@@ -306,7 +326,7 @@ class FeishuTableClient:
         limit: int,
         *,
         timezone_name: str = "",
-    ) -> tuple[list[tuple[object, ...]], int]:
+    ) -> tuple[list[tuple[object, ...]], int, list[str]]:
         field_map = table.get("fieldMap") or {}
         if not isinstance(field_map, dict):
             raise FeishuTableError("飞书表格字段信息格式异常。")
@@ -381,7 +401,180 @@ class FeishuTableClient:
             if isinstance(total_raw, int) and total_raw >= 0
             else len(record_map)
         )
-        return rows, total
+        return rows, total, selected
+
+    def _download_records(
+        self,
+        context,
+        table: dict,
+        selected_ids: list[str],
+        rows: list[tuple[object, ...]],
+    ) -> tuple[list[FeishuRecord], Path]:
+        temp_dir = Path(tempfile.mkdtemp(prefix="autoifq_feishu_"))
+        field_map = table.get("fieldMap") or {}
+        field_ids: dict[str, str] = {}
+        for alias in _SCREENSHOT_FIELD_ALIASES:
+            normalized = _normalize(alias)
+            for field_id, meta in field_map.items():
+                if not isinstance(meta, dict):
+                    continue
+                if _normalize(meta.get("name")) == normalized:
+                    field_ids[normalized] = field_id
+                    break
+
+        resource_map = (
+            (table.get("resourceMap") or {}).get("attachments") or {}
+        ).get("data") or {}
+        record_map = table.get("recordMap") or {}
+
+        records: list[FeishuRecord] = []
+        downloaded = 0
+        for index, record_id in enumerate(selected_ids):
+            values = tuple(rows[index]) if index < len(rows) else ()
+            account = str(values[0]) if values else ""
+            shots: list[Path] = []
+
+            for alias in _SCREENSHOT_FIELD_ALIASES:
+                field_id = field_ids.get(_normalize(alias))
+                if not field_id:
+                    continue
+                record_entry = (record_map.get(record_id) or {}).get(
+                    field_id
+                )
+                record_items = None
+                if isinstance(record_entry, dict):
+                    record_items = record_entry.get("value")
+                resource_items = (
+                    (resource_map.get(field_id) or {}).get(record_id)
+                )
+                items = self._attachment_items(
+                    record_items, resource_items
+                )
+                if not items:
+                    continue
+
+                for shot_index, item in enumerate(
+                    items[:_MAX_SCREENSHOTS_PER_RECORD]
+                ):
+                    path = self._download_attachment(
+                        context, item, temp_dir, index, shot_index
+                    )
+                    if path is not None:
+                        shots.append(path)
+                if shots:
+                    break
+
+            if shots:
+                downloaded += len(shots)
+                self._log(
+                    f"账号 {self._mask(account)} 已下载 "
+                    f"{len(shots)} 张账号内容图片。",
+                    "muted",
+                )
+            else:
+                self._log(
+                    f"账号 {self._mask(account)} 没有账号内容图片，"
+                    "该行询价将被跳过。",
+                    "warn",
+                )
+            records.append(
+                FeishuRecord(
+                    record_id=record_id,
+                    values=values,
+                    account=account,
+                    screenshots=tuple(shots),
+                )
+            )
+
+        if downloaded:
+            self._log(
+                f"账号内容图片准备完成：共下载 {downloaded} 张。",
+                "info",
+            )
+        return records, temp_dir
+
+    @staticmethod
+    def _attachment_items(
+        record_items: object,
+        resource_items: object,
+    ) -> list[dict]:
+        if isinstance(record_items, list) and record_items:
+            return [
+                item for item in record_items if isinstance(item, dict)
+            ]
+        if isinstance(resource_items, list) and resource_items:
+            return [
+                item for item in resource_items if isinstance(item, dict)
+            ]
+        return []
+
+    def _download_attachment(
+        self,
+        context,
+        item: dict,
+        temp_dir: Path,
+        record_index: int,
+        shot_index: int,
+    ) -> Path | None:
+        token = str(
+            item.get("attachmentToken") or item.get("id") or ""
+        ).strip()
+        if not token:
+            return None
+
+        parsed = urlparse(self._config.table_url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        url = (
+            f"{base_url}/space/api/box/stream/download/all/{token}"
+        )
+        try:
+            response = context.request.get(
+                url,
+                headers={"Referer": self._config.table_url},
+                timeout=60000,
+            )
+            if response.status != 200:
+                self._log(
+                    f"账号内容图片下载失败：HTTP {response.status}",
+                    "warn",
+                )
+                return None
+            content = response.body()
+            if not content:
+                return None
+            mime = str(
+                item.get("mimeType")
+                or response.headers.get("content-type")
+                or ""
+            ).lower()
+            if "png" in mime:
+                suffix = ".png"
+            elif "jpeg" in mime or "jpg" in mime:
+                suffix = ".jpg"
+            else:
+                suffix = Path(str(item.get("name") or "")).suffix or ".img"
+            path = (
+                temp_dir
+                / f"record_{record_index}"
+                / f"shot_{shot_index + 1}{suffix}"
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            return path
+        except Exception as exc:
+            self._log(f"账号内容图片下载异常：{exc}", "warn")
+            return None
+
+    @staticmethod
+    def _mask(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "未知账号"
+        if len(text) <= 4:
+            return "*" * len(text)
+        if len(text) <= 8:
+            return text[:2] + "*" * (len(text) - 4) + text[-2:]
+        return text[:3] + "*" * (len(text) - 6) + text[-3:]
 
     @classmethod
     def _field_value(

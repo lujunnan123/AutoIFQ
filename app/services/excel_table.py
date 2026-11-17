@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -255,6 +257,101 @@ def build_result_table(
         limit=limit,
         output_dir=output_dir,
     )
+
+
+def add_quote_columns(
+    output_path: str | Path,
+    merchants: Sequence[str],
+) -> None:
+    """在询价表格末尾追加每个商家的“名称 / 报价”列。"""
+    path = Path(output_path)
+    try:
+        workbook = load_workbook(path)
+    except Exception as exc:
+        raise ExcelTableError(f"无法打开询价表格：{exc}") from exc
+
+    worksheet = workbook.active
+    start_column = len(REQUIRED_COLUMNS) + 1
+    header_font = Font(name="微软雅黑", bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill("solid", fgColor="2F5597")
+    header_alignment = Alignment(horizontal="center", vertical="center")
+    thin = Side(style="thin", color="D9E1F2")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    for index, merchant in enumerate(merchants):
+        name_column = start_column + index * 2
+        price_column = name_column + 1
+        name_cell = worksheet.cell(
+            1, name_column, f"商家{index + 1}名称"
+        )
+        price_cell = worksheet.cell(
+            1, price_column, f"商家{index + 1}报价"
+        )
+        for cell in (name_cell, price_cell):
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = border
+        worksheet.column_dimensions[
+            get_column_letter(name_column)
+        ].width = 22
+        worksheet.column_dimensions[
+            get_column_letter(price_column)
+        ].width = 14
+        name_cell.comment = Comment(
+            text=str(merchant), author="AutoIFQ"
+        )
+
+    worksheet.auto_filter.ref = worksheet.dimensions
+    _save_workbook_atomic(workbook, path)
+
+
+def write_quote(
+    output_path: str | Path,
+    record_index: int,
+    merchant_index: int,
+    merchant_name: str,
+    price: object | None,
+) -> None:
+    """把某个账号的第 merchant_index 个商家报价写入表格。"""
+    path = Path(output_path)
+    try:
+        workbook = load_workbook(path)
+    except Exception as exc:
+        raise ExcelTableError(f"无法打开询价表格：{exc}") from exc
+
+    worksheet = workbook.active
+    row = record_index + 2
+    start_column = len(REQUIRED_COLUMNS) + 1
+    name_column = start_column + merchant_index * 2
+    price_column = name_column + 1
+
+    name_cell = worksheet.cell(row, name_column, merchant_name)
+    name_cell.alignment = Alignment(vertical="top", wrap_text=True)
+    price_cell = worksheet.cell(row, price_column)
+    if price is None or price == "":
+        price_cell.value = "未报价"
+    else:
+        price_cell.value = price
+        if isinstance(price, (int, float)):
+            price_cell.number_format = "#,##0.##"
+    price_cell.alignment = Alignment(
+        horizontal="right", vertical="top"
+    )
+    _save_workbook_atomic(workbook, path)
+
+
+def _save_workbook_atomic(workbook, path: Path) -> None:
+    temp_path = path.with_name(f"{path.stem}.tmp{path.suffix}")
+    try:
+        workbook.save(temp_path)
+        os.replace(temp_path, path)
+    except OSError as exc:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ExcelTableError(f"无法保存询价表格：{exc}") from exc
 
 
 def _write_output(

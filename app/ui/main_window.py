@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -23,9 +26,11 @@ from ..constants import (
 )
 from ..feishu_login import FeishuLoginRunner
 from ..models import RunParams, RunState
+from ..pxb7_login import Pxb7LoginRunner
 from ..runner import LoginRunner
 from ..services.accounts import AccountParseError, read_accounts
 from ..services.feishu_common import feishu_logged_in
+from ..services.merchant_store import MerchantStore, MerchantStoreError
 from ..services.parameter_store import ParameterStore, ParameterStoreError
 from ..services.phrase_store import PhraseStore, PhraseStoreError
 from ..settings import SettingsError, load_settings
@@ -45,6 +50,7 @@ class MainWindow(QMainWindow):
         self,
         phrase_store: PhraseStore | None = None,
         parameter_store: ParameterStore | None = None,
+        merchant_store: MerchantStore | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle(WINDOW_TITLE)
@@ -61,6 +67,16 @@ class MainWindow(QMainWindow):
         self.action_panel = ActionPanel()
         self._manual_test_window: ManualTestWindow | None = None
         self._feishu_login_runner: FeishuLoginRunner | None = None
+        self._pxb7_login_runner: Pxb7LoginRunner | None = None
+        self._pxb7_ready = False
+
+        self._merchant_store = merchant_store or MerchantStore()
+        self._merchant_cache_error: str | None = None
+        self._merchant_save_error_logged = False
+        self._has_merchant_cache = False
+        self._cached_merchants: tuple[str, ...] = ()
+        self._cached_selected: tuple[str, ...] = ()
+        self._load_merchant_cache()
 
         self._phrase_store = phrase_store or PhraseStore()
         self._phrase_store_error: str | None = None
@@ -78,18 +94,31 @@ class MainWindow(QMainWindow):
         self._run_state = RunState.IDLE
         self._login_summary_received = False
         self._build_result: tuple[bool, str] | None = None
+        self._inquiry_summary: tuple[int, int] | None = None
 
         self._build_ui()
         self._connect_signals()
 
         self.action_panel.set_state(RunState.IDLE)
         self._refresh_feishu_chip()
+        self.header.set_pxb7_status("螃蟹未登录", "offline")
         self.set_status("就绪 · 等待导入账号清单")
         self.log(
             "AutoIFQ 界面已加载，请导入账号清单（.txt），"
-            "并确认右上角飞书登录状态后开始。",
+            "并登录飞书、螃蟹账号获取咨询商家后开始。",
             "accent",
         )
+        if self._merchant_cache_error:
+            self.log(
+                f"咨询商家缓存读取失败：{self._merchant_cache_error}",
+                "warn",
+            )
+        elif self._has_merchant_cache:
+            self.log(
+                f"已缓存 {len(self._cached_merchants)} 个咨询商家；"
+                "点击右上角螃蟹状态刷新后使用。",
+                "muted",
+            )
         if self._loaded_phrase_count:
             self.log(
                 f"已加载 {self._loaded_phrase_count} 条询问话术。", "muted"
@@ -143,13 +172,31 @@ class MainWindow(QMainWindow):
         container.setObjectName("SidePanel")
         container.setFixedWidth(SIDE_PANEL_WIDTH)
 
-        column = QVBoxLayout(container)
+        outer = QVBoxLayout(container)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(12)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("SideScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        scroll.viewport().setObjectName("SideScrollViewport")
+
+        content = QWidget()
+        content.setObjectName("SideScrollContent")
+        column = QVBoxLayout(content)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(16)
         column.addWidget(self.parameter_panel)
         column.addWidget(self.phrase_panel)
-        column.addWidget(self.action_panel)
         column.addStretch(1)
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
+        outer.addWidget(self.action_panel, 0)
         return container
 
     def _build_status_bar(self) -> None:
@@ -175,6 +222,7 @@ class MainWindow(QMainWindow):
             self._open_manual_test
         )
         self.header.feishu_clicked.connect(self._start_feishu_login)
+        self.header.pxb7_clicked.connect(self._start_pxb7_login)
 
         self.action_panel.start_requested.connect(self._start)
         self.action_panel.pause_requested.connect(self._toggle_pause)
@@ -182,6 +230,9 @@ class MainWindow(QMainWindow):
 
         self.phrase_panel.phrasesChanged.connect(self._save_phrases)
         self.parameter_panel.valuesChanged.connect(self._save_parameters)
+        self.parameter_panel.merchantsChanged.connect(
+            self._save_merchant_cache
+        )
 
     # ------------------------------------------------------------------
     # 对外接口
@@ -297,6 +348,12 @@ class MainWindow(QMainWindow):
         if self.runner is not None and self.runner.isRunning():
             self.log("询价任务运行中，请先停止任务再登录飞书。", "warn")
             return
+        if (
+            self._pxb7_login_runner is not None
+            and self._pxb7_login_runner.isRunning()
+        ):
+            self.log("请先等待螃蟹账号登录完成。", "warn")
+            return
 
         try:
             settings = load_settings()
@@ -339,6 +396,117 @@ class MainWindow(QMainWindow):
     def _on_feishu_runner_finished(self) -> None:
         runner = self._feishu_login_runner
         self._feishu_login_runner = None
+        if runner is not None:
+            runner.deleteLater()
+
+    # ------------------------------------------------------------------
+    # 螃蟹登录 / 咨询商家
+    # ------------------------------------------------------------------
+
+    def _start_pxb7_login(self) -> None:
+        if (
+            self._pxb7_login_runner is not None
+            and self._pxb7_login_runner.isRunning()
+        ):
+            self.log("螃蟹账号登录正在进行中，请稍候。", "warn")
+            return
+        if self.runner is not None and self.runner.isRunning():
+            self.log("询价任务运行中，请先停止任务再登录螃蟹账号。", "warn")
+            return
+        if (
+            self._feishu_login_runner is not None
+            and self._feishu_login_runner.isRunning()
+        ):
+            self.log("请先等待飞书扫码登录完成。", "warn")
+            return
+
+        try:
+            settings = load_settings()
+        except SettingsError as exc:
+            self.log(str(exc), "error")
+            QMessageBox.warning(self, "配置缺失", str(exc))
+            return
+
+        account = settings.pxb7_account
+        if not (account.phone and account.password):
+            self.log(
+                "请在 config.json 的 pxb7_account 中配置螃蟹账号"
+                " phone 和 password。",
+                "error",
+            )
+            self.set_status("缺少螃蟹账号配置")
+            return
+
+        self.header.set_pxb7_status("登录中…", "logging")
+        self.log(
+            "正在登录螃蟹账号并获取三角洲行动咨询商家…", "accent"
+        )
+        self.set_status("螃蟹登录中 · 正在获取咨询商家")
+
+        runner = Pxb7LoginRunner(settings, self)
+        runner.log_message.connect(self.log)
+        runner.status_changed.connect(self._on_pxb7_status)
+        runner.merchants_loaded.connect(self._on_pxb7_merchants)
+        runner.completed.connect(self._on_pxb7_completed)
+        runner.finished.connect(self._on_pxb7_runner_finished)
+        self._pxb7_login_runner = runner
+        runner.start()
+
+    def _on_pxb7_status(self, state: str) -> None:
+        if state == "logging":
+            self.header.set_pxb7_status("登录中…", "logging")
+        elif state == "logged_in":
+            self.header.set_pxb7_status("螃蟹已登录", "online")
+        elif state == "error":
+            self.header.set_pxb7_status("螃蟹未登录", "offline")
+
+    def _on_pxb7_merchants(self, names: list) -> None:
+        values: list[str] = []
+        seen: set[str] = set()
+        for name in names:
+            if not isinstance(name, str):
+                continue
+            value = name.strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            values.append(value)
+
+        if not values:
+            self.log("未获取到三角洲行动咨询商家。", "warn")
+            return
+
+        if self._has_merchant_cache:
+            selected = [
+                name for name in self._cached_selected if name in seen
+            ]
+        else:
+            selected = list(values)
+
+        self.parameter_panel.set_merchants(values, selected)
+        self._pxb7_ready = True
+        self.log(
+            f"已加载 {len(values)} 个咨询商家，"
+            f"已勾选 {len(selected)} 个。",
+            "success",
+        )
+        self.set_status(
+            f"螃蟹已登录 · 已获取 {len(values)} 个咨询商家"
+        )
+
+    def _on_pxb7_completed(self, success: bool, detail: str) -> None:
+        if success:
+            self.header.set_pxb7_status("螃蟹已登录", "online")
+            self.log(f"螃蟹账号已就绪：{detail}", "success")
+            self.set_status(f"螃蟹已登录 · {detail}")
+        else:
+            self._pxb7_ready = False
+            self.header.set_pxb7_status("螃蟹未登录", "offline")
+            self.set_status("螃蟹登录失败 · 查看运行日志")
+
+    def _on_pxb7_runner_finished(self) -> None:
+        runner = self._pxb7_login_runner
+        self._pxb7_login_runner = None
         if runner is not None:
             runner.deleteLater()
 
@@ -387,6 +555,38 @@ class MainWindow(QMainWindow):
                 self._parameter_save_error_logged = True
 
     # ------------------------------------------------------------------
+    # 咨询商家缓存
+    # ------------------------------------------------------------------
+
+    def _load_merchant_cache(self) -> None:
+        try:
+            cache = self._merchant_store.load()
+        except MerchantStoreError as exc:
+            self._merchant_cache_error = str(exc)
+            return
+        if cache is None:
+            return
+        self._has_merchant_cache = True
+        self._cached_merchants = cache.merchants
+        self._cached_selected = cache.selected
+
+    def _save_merchant_cache(self) -> None:
+        merchants = self.parameter_panel.merchants()
+        if not merchants:
+            return
+        selected = self.parameter_panel.selected_merchants()
+        try:
+            self._merchant_store.save(merchants, selected)
+            self._has_merchant_cache = True
+            self._cached_merchants = merchants
+            self._cached_selected = selected
+            self._merchant_save_error_logged = False
+        except MerchantStoreError as exc:
+            if not self._merchant_save_error_logged:
+                self.log(f"咨询商家缓存保存失败：{exc}", "error")
+                self._merchant_save_error_logged = True
+
+    # ------------------------------------------------------------------
     # 运行控制
     # ------------------------------------------------------------------
 
@@ -398,6 +598,12 @@ class MainWindow(QMainWindow):
             and self._feishu_login_runner.isRunning()
         ):
             self.log("请先在浏览器中完成飞书扫码登录。", "warn")
+            return
+        if (
+            self._pxb7_login_runner is not None
+            and self._pxb7_login_runner.isRunning()
+        ):
+            self.log("请等待螃蟹账号登录和商家获取完成。", "warn")
             return
 
         file_path = self.upload_panel.current_file()
@@ -424,6 +630,24 @@ class MainWindow(QMainWindow):
             self.set_status("缺少飞书登录 · 请点击右上角登录")
             return
 
+        if not self._pxb7_ready or not self.parameter_panel.merchants():
+            self.header.set_pxb7_status("螃蟹未登录", "offline")
+            self.log(
+                "请先点击右上角「螃蟹未登录」登录螃蟹账号，"
+                "获取三角洲行动咨询商家后再开始。",
+                "warn",
+            )
+            self.set_status("缺少螃蟹登录 / 咨询商家")
+            return
+
+        selected_merchants = self.parameter_panel.selected_merchants()
+        if not selected_merchants:
+            self.log(
+                "请至少勾选一个咨询商家后再开始询价。", "warn"
+            )
+            self.set_status("未选择咨询商家")
+            return
+
         try:
             accounts = read_accounts(
                 file_path, settings.login.default_password
@@ -433,6 +657,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "账号解析失败", str(exc))
             self.set_status("清单中没有可用账号")
             return
+
+        self.log(
+            f"本次询价将咨询 {len(selected_merchants)} 个商家。",
+            "info",
+        )
 
         params = self.collect_params()
         threads = max(1, min(params.threads, len(accounts)))
@@ -448,13 +677,18 @@ class MainWindow(QMainWindow):
 
         self._login_summary_received = False
         self._build_result = None
-        self.runner = LoginRunner(accounts, threads, settings, self)
+        self._inquiry_summary = None
+        self.runner = LoginRunner(
+            accounts, threads, settings, params, self
+        )
         self.runner.log_message.connect(self.log)
         self.runner.build_status.connect(self._on_build_status)
         self.runner.build_result.connect(self._on_build_result)
         self.runner.thread_added.connect(self._on_thread_added)
         self.runner.thread_step.connect(self._on_thread_step)
         self.runner.thread_finished.connect(self._on_thread_finished)
+        self.runner.inquiry_summary.connect(self._on_inquiry_summary)
+        self.runner.pxb7_expired.connect(self._on_pxb7_expired)
         self.runner.summary.connect(self._on_login_summary)
         self.runner.finished.connect(self._on_runner_finished)
         self.runner.start()
@@ -545,8 +779,31 @@ class MainWindow(QMainWindow):
         self, thread_id: int, success: bool, detail: str
     ) -> None:
         self.progress_panel.remove_thread(thread_id)
-        outcome = "完成" if success else "失败"
-        self.set_status(f"线程 {thread_id} {outcome} · 继续后续任务")
+        outcome = "完成" if success else "未完成"
+        if detail:
+            self.set_status(f"{outcome} · {detail}")
+        else:
+            self.set_status(f"线程 {thread_id} {outcome} · 继续后续任务")
+
+    def _on_inquiry_summary(self, quoted: int, total: int) -> None:
+        self._inquiry_summary = (quoted, total)
+        if total:
+            level = "success" if quoted else "warn"
+            self.log(
+                f"询价阶段结束：{quoted}/{total} 个任务获得报价。",
+                level,
+            )
+        else:
+            self.log("询价阶段未产生可执行任务。", "warn")
+
+    def _on_pxb7_expired(self) -> None:
+        self._pxb7_ready = False
+        self.header.set_pxb7_status("螃蟹未登录", "offline")
+        self.log(
+            "螃蟹登录状态已失效，请点击右上角重新登录后再运行。",
+            "error",
+        )
+        self.set_status("螃蟹登录失效 · 请重新登录")
 
     def _on_login_summary(self, success: int, total: int, cancelled: bool) -> None:
         self._login_summary_received = True
@@ -569,6 +826,38 @@ class MainWindow(QMainWindow):
                 "构建表格失败，线程未执行", final=True
             )
             self.set_status("构建表格失败 · 线程未执行")
+            return
+
+        if self._inquiry_summary is not None:
+            quoted, tasks = self._inquiry_summary
+            self.progress_panel.clear_threads()
+            if tasks <= 0:
+                self.progress_panel.set_chip("询价未执行", "error")
+                self.progress_panel.set_thread_message(
+                    "询价阶段未执行或未产生任务", final=True
+                )
+                self.set_status("询价阶段未执行 · 查看日志")
+                return
+            if quoted > 0:
+                self.progress_panel.set_chip("询价完成", "done")
+                self.progress_panel.set_thread_message(
+                    f"询价完成 · {quoted}/{tasks} 个任务获得报价",
+                    final=True,
+                )
+                self.set_status(
+                    f"完成 · 报价 {quoted}/{tasks} · "
+                    f"上号 {success}/{total} 个账号"
+                )
+            else:
+                self.progress_panel.set_chip("询价结束", "error")
+                self.progress_panel.set_thread_message(
+                    f"询价结束 · {tasks} 个任务未获取到报价",
+                    final=True,
+                )
+                self.set_status(
+                    f"询价结束 · 未获取到报价 · "
+                    f"上号 {success}/{total} 个账号"
+                )
             return
 
         if success > 0:
@@ -622,4 +911,10 @@ class MainWindow(QMainWindow):
         ):
             self._feishu_login_runner.cancel()
             self._feishu_login_runner.wait(7000)
+        if (
+            self._pxb7_login_runner is not None
+            and self._pxb7_login_runner.isRunning()
+        ):
+            self._pxb7_login_runner.cancel()
+            self._pxb7_login_runner.wait(15000)
         super().closeEvent(event)

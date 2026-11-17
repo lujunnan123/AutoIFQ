@@ -16,6 +16,7 @@ from ..utils import repolish
 
 class HeaderBar(QWidget):
     feishu_clicked = pyqtSignal()
+    pxb7_clicked = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -50,6 +51,15 @@ class HeaderBar(QWidget):
         titles.addLayout(title_row)
         titles.addWidget(description)
 
+        self.pxb7_chip = QPushButton("螃蟹未登录")
+        self.pxb7_chip.setObjectName("Pxb7Chip")
+        self.pxb7_chip.setProperty("state", "offline")
+        self.pxb7_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pxb7_chip.setToolTip("点击登录螃蟹账号并获取咨询商家")
+        self.pxb7_chip.clicked.connect(
+            lambda: self.pxb7_clicked.emit()
+        )
+
         self.feishu_chip = QPushButton("飞书未登录")
         self.feishu_chip.setObjectName("FeishuChip")
         self.feishu_chip.setProperty("state", "offline")
@@ -61,9 +71,15 @@ class HeaderBar(QWidget):
 
         layout.addWidget(logo)
         layout.addLayout(titles, 1)
+        layout.addWidget(self.pxb7_chip, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self.feishu_chip, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def set_feishu_status(self, text: str, state: str) -> None:
         self.feishu_chip.setText(text)
         self.feishu_chip.setProperty("state", state)
         repolish(self.feishu_chip)
+
+    def set_pxb7_status(self, text: str, state: str) -> None:
+        self.pxb7_chip.setText(text)
+        self.pxb7_chip.setProperty("state", state)
+        repolish(self.pxb7_chip)

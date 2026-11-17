@@ -37,6 +37,25 @@ class Pxb7Settings:
     request_timeout: float = 30.0
 
 
+PXB7_RECOVERY_URL = (
+    "https://www.pxb7.com/sell/recovery/game/10371?bizProd=1"
+)
+
+
+@dataclass(frozen=True)
+class Pxb7AccountSettings:
+    """用于获取三角洲行动咨询商家的螃蟹账号。"""
+
+    phone: str = ""
+    password: str = field(default="", repr=False)
+    state_path: str = "data/pxb7_state.json"
+    browser_channel: str = "msedge"
+    headless: bool = True
+    login_timeout: float = 120.0
+    game_name: str = "三角洲行动"
+    recovery_url: str = PXB7_RECOVERY_URL
+
+
 @dataclass(frozen=True)
 class LoginSettings:
     sms_wait_timeout: float = 60.0
@@ -91,6 +110,7 @@ class FeishuSettings:
 class AppSettings:
     sms_admin: SmsAdminSettings
     pxb7: Pxb7Settings
+    pxb7_account: Pxb7AccountSettings
     login: LoginSettings
     excel: ExcelSettings
     feishu: FeishuSettings
@@ -143,6 +163,7 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
         raise SettingsError("sms_admin.base_url 必须是 http(s) 地址。")
 
     pxb7_raw = raw.get("pxb7") or {}
+    pxb7_account_raw = raw.get("pxb7_account") or {}
     login_raw = raw.get("login") or {}
     excel_raw = raw.get("excel") or {}
     feishu_raw = raw.get("feishu") or {}
@@ -162,6 +183,31 @@ def load_settings(path: str | Path | None = None) -> AppSettings:
             website=str(pxb7_raw.get("website") or "https://www.pxb7.com").rstrip("/"),
             country_code=str(pxb7_raw.get("country_code") or "86"),
             request_timeout=_as_float(pxb7_raw.get("request_timeout"), 30.0),
+        ),
+        pxb7_account=Pxb7AccountSettings(
+            phone=str(pxb7_account_raw.get("phone") or "").strip(),
+            password=str(pxb7_account_raw.get("password") or ""),
+            state_path=str(
+                pxb7_account_raw.get("state_path")
+                or "data/pxb7_state.json"
+            ),
+            browser_channel=str(
+                pxb7_account_raw.get("browser_channel") or "msedge"
+            ).strip(),
+            headless=_as_bool(
+                pxb7_account_raw.get("headless"), True
+            ),
+            login_timeout=max(
+                30.0,
+                _as_float(pxb7_account_raw.get("login_timeout"), 120.0),
+            ),
+            game_name=str(
+                pxb7_account_raw.get("game_name") or "三角洲行动"
+            ),
+            recovery_url=str(
+                pxb7_account_raw.get("recovery_url")
+                or PXB7_RECOVERY_URL
+            ),
         ),
         excel=ExcelSettings(
             copy_limit=max(0, _as_int(excel_raw.get("copy_limit"), 5)),

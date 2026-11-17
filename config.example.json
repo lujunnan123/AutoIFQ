@@ -12,6 +12,16 @@
     "country_code": "86",
     "request_timeout": 30
   },
+  "pxb7_account": {
+    "phone": "填写用于获取咨询商家的螃蟹手机号",
+    "password": "填写螃蟹账号密码",
+    "state_path": "data/pxb7_state.json",
+    "browser_channel": "msedge",
+    "headless": true,
+    "login_timeout": 120,
+    "game_name": "三角洲行动",
+    "recovery_url": "https://www.pxb7.com/sell/recovery/game/10371?bizProd=1"
+  },
   "login": {
     "sms_wait_timeout": 60,
     "sms_poll_interval": 3,
