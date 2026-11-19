@@ -624,6 +624,12 @@ QLabel#ProxyStatus {
 QDialog#ManualInquiryWindow {
     background-color: #0b1017;
 }
+QScrollArea#ManualBodyScroll,
+QWidget#ManualBodyViewport,
+QWidget#ManualBodyContent {
+    background: transparent;
+    border: none;
+}
 QComboBox#ManualMerchant {
     background-color: #0b121b;
     border: 1px solid #223043;

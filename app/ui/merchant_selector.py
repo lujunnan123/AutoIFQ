@@ -25,8 +25,10 @@ class MerchantSelector(QWidget):
         parent: QWidget | None = None,
         *,
         title: str = "咨询商家",
+        list_height: int = 118,
     ) -> None:
         super().__init__(parent)
+        list_height = max(64, int(list_height))
         self._merchants: list[str] = []
         self._checks: list[QCheckBox] = []
         self._updating = False
@@ -68,7 +70,7 @@ class MerchantSelector(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setObjectName("MerchantScroll")
         self.scroll.setWidgetResizable(True)
-        self.scroll.setFixedHeight(118)
+        self.scroll.setFixedHeight(list_height)
         self.scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
@@ -87,7 +89,7 @@ class MerchantSelector(QWidget):
         self.empty_label.setObjectName("MerchantEmpty")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_label.setWordWrap(True)
-        self.empty_label.setMinimumHeight(104)
+        self.empty_label.setMinimumHeight(max(52, list_height - 14))
         self._list_layout.addWidget(self.empty_label)
         self._list_layout.addStretch(1)
 

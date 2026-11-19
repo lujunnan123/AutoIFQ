@@ -16,6 +16,52 @@ from .pxb7_yd_token import Pxb7BrowserYdTokenProvider
 
 StepCallback = Callable[[float, str], None]
 
+_PROXY_ERROR_MARKERS = (
+    "err_tunnel_connection_failed",
+    "err_proxy_connection_failed",
+    "err_proxy_auth_required",
+    "err_no_supported_proxies",
+    "err_connection_reset",
+    "err_connection_closed",
+    "err_connection_timed_out",
+    "err_timed_out",
+    "err_name_not_resolved",
+    "timeout",
+    "超时",
+    "行为验证失败",
+    "代理网络下登录页未加载",
+    "代理连接失败",
+    "代理不可达",
+)
+
+
+def is_proxy_login_error(exc: BaseException) -> bool:
+    """判断登录异常是否更像代理线路问题。"""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in _PROXY_ERROR_MARKERS)
+
+
+def proxy_error_hint(exc: BaseException) -> str:
+    text = str(exc)
+    if "ERR_TUNNEL_CONNECTION_FAILED" in text:
+        return (
+            "代理 HTTPS 隧道建立失败，常见原因是代理已失效、"
+            "未加入白名单、鉴权失败或线路不可用"
+        )
+    if "ERR_PROXY_AUTH_REQUIRED" in text:
+        return "代理要求鉴权，请检查代理账号密码或白名单配置"
+    if "行为验证失败" in text:
+        return "当前代理 IP 被易盾判定为风险，请更换代理线路"
+    if (
+        "ERR_TIMED_OUT" in text
+        or "Timeout" in text
+        or "超时" in text
+    ):
+        return "代理线路超时，请更换更快的代理"
+    if "ERR_CONNECTION_RESET" in text or "ERR_CONNECTION_CLOSED" in text:
+        return "代理连接被重置，请更换代理线路"
+    return "代理线路异常，请检查代理接口、白名单或有效期"
+
 
 @dataclass(frozen=True)
 class PhoneLoginResult:

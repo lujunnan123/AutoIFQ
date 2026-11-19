@@ -15,6 +15,7 @@ from .constants import StepStatus
 from .models import RunParams
 from .services.accounts import Account
 from .services.consult_history import (
+    HISTORY_LOCK,
     ConsultHistoryStore,
     ConsultHistoryStoreError,
 )
@@ -395,36 +396,38 @@ class LoginRunner(QThread):
         else:
             self._log("询问话术为空，将使用默认话术。", "warn")
 
-        try:
-            history = self._history_store.load()
-        except ConsultHistoryStoreError as exc:
-            self._log(
-                f"咨询历史读取失败：{exc}；本次按空历史执行。",
-                "warn",
-            )
-            history = {}
+        # 主界面与手动询价窗口可能同时分配手机号，保证分配过程原子执行。
+        with HISTORY_LOCK:
+            try:
+                history = self._history_store.load()
+            except ConsultHistoryStoreError as exc:
+                self._log(
+                    f"咨询历史读取失败：{exc}；本次按空历史执行。",
+                    "warn",
+                )
+                history = {}
 
-        assignments: dict[str, list[tuple[int, int, FeishuRecord, str]]] = {
-            phone: [] for phone in phones
-        }
-        skipped: list[tuple[int, int, FeishuRecord, str]] = []
-        for record_index, record in eligible:
-            for merchant_index, merchant in enumerate(merchants):
-                chosen = None
-                for phone in phones:
-                    if merchant not in history.get(phone, set()):
-                        chosen = phone
-                        break
-                if chosen is None:
-                    skipped.append(
+            assignments: dict[
+                str, list[tuple[int, int, FeishuRecord, str]]
+            ] = {phone: [] for phone in phones}
+            skipped: list[tuple[int, int, FeishuRecord, str]] = []
+            for record_index, record in eligible:
+                for merchant_index, merchant in enumerate(merchants):
+                    chosen = None
+                    for phone in phones:
+                        if merchant not in history.get(phone, set()):
+                            chosen = phone
+                            break
+                    if chosen is None:
+                        skipped.append(
+                            (record_index, merchant_index, record, merchant)
+                        )
+                        continue
+                    history.setdefault(chosen, set()).add(merchant)
+                    assignments[chosen].append(
                         (record_index, merchant_index, record, merchant)
                     )
-                    continue
-                history.setdefault(chosen, set()).add(merchant)
-                assignments[chosen].append(
-                    (record_index, merchant_index, record, merchant)
-                )
-        self._save_history(history)
+            self._save_history(history)
 
         for record_index, merchant_index, record, merchant in skipped:
             self._inquiry_total += 1

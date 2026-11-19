@@ -6,7 +6,7 @@ import random
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -48,6 +48,20 @@ class ChatQuoteResult:
     replies: tuple[str, ...]
     phrase: str
     timed_out: bool
+
+
+@dataclass
+class PendingChatInquiry:
+    """已发送询价、等待商家回复的聊天窗口。"""
+
+    merchant_name: str
+    chat: object
+    baseline: list[str]
+    phrase: str
+    started_at: float
+    sent_at: float
+    replies: list[str] = field(default_factory=list)
+    last_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -162,9 +176,60 @@ class Pxb7ChatService:
         cancel: threading.Event | None = None,
     ) -> ChatQuoteResult:
         cancel = cancel or threading.Event()
+        pending = self.start_inquiry(
+            merchant_name, screenshot_paths, phrase, cancel
+        )
+        try:
+            self._log(
+                f"{merchant_name}：等待回复"
+                f"（最多 {int(timeout)} 秒）…",
+                "info",
+            )
+            price, replies, timed_out = self._wait_for_price(
+                pending.chat,
+                pending.baseline,
+                timeout,
+                cancel,
+                merchant_name,
+            )
+        finally:
+            self.close_pending(pending)
+
+        if price is not None:
+            self._log(
+                f"{merchant_name} 报价：{price:g}", "success"
+            )
+        elif timed_out:
+            self._log(
+                f"{merchant_name} 在 {int(timeout)} 秒内未给出可识别报价。",
+                "warn",
+            )
+        else:
+            self._log(
+                f"{merchant_name} 暂未给出可识别报价。", "warn"
+            )
+
+        return ChatQuoteResult(
+            merchant_name=merchant_name,
+            price=price,
+            replies=tuple(replies),
+            phrase=pending.phrase,
+            timed_out=timed_out,
+        )
+
+    def start_inquiry(
+        self,
+        merchant_name: str,
+        screenshot_paths: Iterable[Path],
+        phrase: str,
+        cancel: threading.Event | None = None,
+    ) -> PendingChatInquiry:
+        """打开商家聊天并发送截图和话术，保持聊天窗口打开。"""
+        cancel = cancel or threading.Event()
         self._check_cancel(cancel)
         screenshots = [Path(path) for path in screenshot_paths]
         selected_phrase = phrase.strip() or self._default_phrase()
+        started_at = time.monotonic()
 
         self._log(
             f"进入商家聊天坑位：{merchant_name}", "info"
@@ -185,42 +250,69 @@ class Pxb7ChatService:
                 )
 
             self._send_text(chat, selected_phrase, cancel, "话术")
-            self._log(
-                f"{merchant_name}：已发送账号内容图片和话术，"
-                f"等待回复（最多 {int(timeout)} 秒）…",
-                "info",
-            )
-            price, replies, timed_out = self._wait_for_price(
-                chat, baseline, timeout, cancel, merchant_name
-            )
-        finally:
-            try:
-                if chat is not self._page:
-                    chat.close()
-            except Exception:
-                pass
+        except Exception:
+            self._close_chat(chat)
+            raise
 
-        if price is not None:
-            self._log(
-                f"{merchant_name} 报价：{price:g}", "success"
-            )
-        elif timed_out:
-            self._log(
-                f"{merchant_name} 在 {int(timeout)} 秒内未给出可识别报价。",
-                "warn",
-            )
-        else:
-            self._log(
-                f"{merchant_name} 暂未给出可识别报价。", "warn"
-            )
-
-        return ChatQuoteResult(
-            merchant_name=merchant_name,
-            price=price,
-            replies=tuple(replies),
-            phrase=selected_phrase,
-            timed_out=timed_out,
+        now = time.monotonic()
+        self._log(
+            f"{merchant_name}：已发送账号内容图片和话术，等待回复…",
+            "info",
         )
+        return PendingChatInquiry(
+            merchant_name=merchant_name,
+            chat=chat,
+            baseline=baseline,
+            phrase=selected_phrase,
+            started_at=started_at,
+            sent_at=now,
+            last_count=len(baseline),
+        )
+
+    def poll_pending(
+        self,
+        pending: PendingChatInquiry,
+        cancel: threading.Event | None = None,
+    ) -> float | None:
+        """读取一次待回复聊天；发现报价时返回价格，否则返回 None。"""
+        cancel = cancel or threading.Event()
+        self._check_cancel(cancel)
+        try:
+            current = self._left_texts(pending.chat)
+        except PlaywrightError as exc:
+            raise Pxb7ChatError(
+                f"读取商家回复失败：{exc}"
+            ) from exc
+
+        if len(current) <= pending.last_count:
+            return None
+
+        price = None
+        for text in current[pending.last_count:]:
+            if not text:
+                continue
+            pending.replies.append(text)
+            preview = text.replace("\n", " ")
+            if len(preview) > 200:
+                preview = preview[:200] + "…"
+            self._log(
+                f"{pending.merchant_name} 回复：{preview}", "info"
+            )
+            candidate = self.extract_price(text)
+            if candidate is not None and price is None:
+                price = candidate
+        pending.last_count = len(current)
+        return price
+
+    def close_pending(self, pending: PendingChatInquiry) -> None:
+        self._close_chat(pending.chat)
+
+    def _close_chat(self, chat) -> None:
+        try:
+            if chat is not None and chat is not self._page:
+                chat.close()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # 商家 / 聊天页面

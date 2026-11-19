@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import functools
 import os
+import threading
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +14,10 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from ..settings import PROJECT_ROOT
+
+# 多个手动询价窗口可能同时写入日志；串行化文件创建与保存，
+# 既避免同名日志冲突，也避免 openpyxl 同时写同一个文件。
+_LOG_LOCK = threading.Lock()
 
 _HEADERS = (
     "时间",
@@ -44,6 +50,16 @@ class ManualLogError(Exception):
     """手动询价日志保存失败。"""
 
 
+def _synchronized(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with _LOG_LOCK:
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
+@_synchronized
 def append_manual_inquiry_log(
     path: str | Path | None,
     *,

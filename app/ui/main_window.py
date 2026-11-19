@@ -66,7 +66,8 @@ class MainWindow(QMainWindow):
         self.parameter_panel = ParameterPanel()
         self.phrase_panel = PhrasePanel()
         self.action_panel = ActionPanel()
-        self._manual_inquiry_window: ManualInquiryWindow | None = None
+        self._manual_inquiry_windows: list[ManualInquiryWindow] = []
+        self._manual_window_sequence = 0
         self._feishu_login_runner: FeishuLoginRunner | None = None
         self._pxb7_login_runner: Pxb7LoginRunner | None = None
         self._pxb7_ready = False
@@ -234,6 +235,9 @@ class MainWindow(QMainWindow):
         self.parameter_panel.merchantsChanged.connect(
             self._save_merchant_cache
         )
+        self.parameter_panel.merchantsChanged.connect(
+            self._sync_manual_merchant_lists
+        )
         self.parameter_panel.proxySettingsRequested.connect(
             self._open_proxy_settings
         )
@@ -312,45 +316,48 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _open_manual_inquiry(self) -> None:
-        if self._manual_inquiry_window is not None:
-            self._manual_inquiry_window.raise_()
-            self._manual_inquiry_window.activateWindow()
-            return
-
+        # 每次打开都创建一个独立窗口；商户、参数和手机号领取互不影响。
+        self._manual_window_sequence += 1
         window = ManualInquiryWindow(
             self,
-            merchant_provider=self.parameter_panel.merchants,
-            selected_merchant_provider=(
-                self.parameter_panel.selected_merchants
-            ),
-            params_provider=self.collect_params,
+            merchants=self.parameter_panel.merchants(),
+            phrase_provider=self.phrase_panel.phrases,
             account_file_provider=self.upload_panel.current_file,
+            window_number=self._manual_window_sequence,
         )
         window.destroyed.connect(
-            lambda: setattr(self, "_manual_inquiry_window", None)
+            lambda _obj=None, manual=window: self._on_manual_window_destroyed(
+                manual
+            )
         )
-        window.merchantSelectionChanged.connect(
-            self._on_manual_merchant_selection_changed
-        )
-        self.parameter_panel.merchantsChanged.connect(
-            window.sync_merchants_from_main
-        )
-        self._manual_inquiry_window = window
+        self._manual_inquiry_windows.append(window)
         window.show()
-        self.log("已打开手动询价界面。", "info")
-
-    def _on_manual_merchant_selection_changed(self) -> None:
-        window = self._manual_inquiry_window
-        if window is None:
-            return
-        selected = window.selected_merchants()
-        if set(selected) == set(
-            self.parameter_panel.selected_merchants()
-        ):
-            return
-        self.parameter_panel.set_merchants(
-            self.parameter_panel.merchants(), selected
+        self.log(
+            f"已打开手动询价界面 #{self._manual_window_sequence}："
+            "商户与参数独立，仅共用主界面询问话术；"
+            "每个窗口从 TXT 领取 1 个手机号。",
+            "info",
         )
+
+    def _on_manual_window_destroyed(
+        self, window: ManualInquiryWindow
+    ) -> None:
+        try:
+            self._manual_inquiry_windows.remove(window)
+        except ValueError:
+            pass
+
+    def _sync_manual_merchant_lists(self) -> None:
+        """主界面刷新商家名称时，同步到各手动窗口但保留其勾选。"""
+        if not self._manual_inquiry_windows:
+            return
+        merchants = self.parameter_panel.merchants()
+        for window in tuple(self._manual_inquiry_windows):
+            try:
+                window.set_available_merchants(merchants)
+            except RuntimeError:
+                # 窗口可能正在销毁，忽略该窗口。
+                continue
 
     # ------------------------------------------------------------------
     # 飞书登录
@@ -968,11 +975,11 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._save_phrases()
         self._save_parameters()
-        if self._manual_inquiry_window is not None:
-            if self._manual_inquiry_window.is_busy():
-                self._manual_inquiry_window.shutdown()
+        for window in tuple(self._manual_inquiry_windows):
+            if window.is_busy():
+                window.shutdown()
             else:
-                self._manual_inquiry_window.cleanup()
+                window.cleanup()
         if self.runner is not None and self.runner.isRunning():
             self.runner.cancel()
             self.runner.wait(35000)

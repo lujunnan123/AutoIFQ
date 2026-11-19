@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from ..settings import PROJECT_ROOT
 
 DEFAULT_PATH = PROJECT_ROOT / "data" / "consult_history.json"
+
+# 主界面与多个手动询价窗口可能同时分配手机号。
+# 用进程内锁保证「读取历史 -> 分配手机号 -> 保存历史」不会被并发覆盖。
+HISTORY_LOCK = threading.RLock()
 
 
 class ConsultHistoryStoreError(Exception):

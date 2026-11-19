@@ -1,30 +1,34 @@
-"""手动询价窗口：多图上传，TXT 手机号 + 代理登录并展示实时报价。"""
+"""手动询价窗口：独立商户与参数，共用主界面询问话术库。"""
 
 from __future__ import annotations
 
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QBrush, QColor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QDialog,
+    QDoubleSpinBox,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QPushButton,
+    QScrollArea,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from ..constants import PARAMETER_FIELDS, SpinFieldSpec
 from ..manual_inquiry import ManualInquiryRunner, ManualMerchantQuote
-from ..models import RunParams
-from ..services.accounts import AccountParseError, read_accounts
 from ..settings import SettingsError, load_settings
 from .card import Card
 from .image_upload import ImageUploader
@@ -38,54 +42,49 @@ _QUOTE_COLORS = {
     "no_quote": "#f5c35a",
     "error": "#ff8b9c",
 }
+_MANUAL_PARAMETER_KEYS = ("timeout_sec", "interval_sec")
 
 
 class ManualInquiryWindow(QDialog):
-    merchantSelectionChanged = pyqtSignal()
+    """一个独立的手动询价窗口，拥有自己的商户、参数和询价线程。"""
 
     def __init__(
         self,
         parent: QWidget | None = None,
         *,
-        merchant_provider: Callable[[], tuple[str, ...]] | None = None,
-        selected_merchant_provider: (
-            Callable[[], tuple[str, ...]] | None
-        ) = None,
-        params_provider: Callable[[], RunParams] | None = None,
+        merchants: Iterable[str] = (),
+        phrase_provider: Callable[[], Iterable[str]] | None = None,
         account_file_provider: Callable[[], str | None] | None = None,
+        window_number: int | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("ManualInquiryWindow")
-        self.setWindowTitle("手动询价")
-        self.resize(1200, 900)
+        self._window_number = window_number
+        title = (
+            f"手动询价 #{window_number}"
+            if window_number is not None
+            else "手动询价"
+        )
+        self.setWindowTitle(title)
+        self._apply_screen_size()
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self._paste_dir = Path(
             tempfile.mkdtemp(prefix="autoifq_manual_")
         )
 
-        self._merchant_provider = merchant_provider or (lambda: ())
-        self._selected_merchant_provider = (
-            selected_merchant_provider or (lambda: ())
-        )
-        self._params_provider = params_provider or (
-            lambda: RunParams(
-                threads=1,
-                interval_sec=3.0,
-                timeout_sec=90,
-                retries=0,
-                merchants=(),
-                phrases=(),
-            )
-        )
+        merchant_values = tuple(merchants)
+        self._phrase_provider = phrase_provider or (lambda: ())
         self._account_file_provider = account_file_provider or (lambda: None)
 
         self._runner: ManualInquiryRunner | None = None
         self._log_path: Path | None = None
+        self._param_spins: dict[str, QSpinBox | QDoubleSpinBox] = {}
+        self._pending_merchants: tuple[str, ...] | None = None
         self._syncing_merchants = False
         self._closing = False
         self._temp_cleaned = False
 
-        self._build_ui()
+        self._build_ui(title)
         self._paste_shortcut = QShortcut(
             QKeySequence.StandardKey.Paste, self
         )
@@ -93,92 +92,146 @@ class ManualInquiryWindow(QDialog):
             Qt.ShortcutContext.WidgetWithChildrenShortcut
         )
         self._paste_shortcut.activated.connect(self._paste_images)
-        self.sync_merchants_from_main()
+
+        # 商户和参数完全由本窗口维护；打开时默认不勾选商户。
+        self._syncing_merchants = True
+        try:
+            self.merchant_selector.set_merchants(
+                merchant_values, ()
+            )
+        finally:
+            self._syncing_merchants = False
+        self._refresh_quote_rows()
+        self._update_actions()
 
     # ------------------------------------------------------------------
     # UI
     # ------------------------------------------------------------------
 
-    def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 20)
-        layout.setSpacing(12)
+    def _apply_screen_size(self) -> None:
+        """初始高度不超过当前屏幕可用区域。"""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.setMinimumHeight(420)
+            self.resize(1200, 700)
+            return
+        available = screen.availableGeometry()
+        width = min(1200, max(960, available.width() - 60))
+        height = min(600, max(420, available.height() - 70))
+        self.setMinimumHeight(420)
+        self.resize(width, height)
 
-        title = QLabel("手动询价")
+    def _build_ui(self, title_text: str) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("ManualBodyScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        scroll.viewport().setObjectName("ManualBodyViewport")
+
+        host = QWidget()
+        host.setObjectName("ManualBodyContent")
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        title = QLabel(title_text)
         title.setObjectName("AppTitle")
-        subtitle = QLabel(
-            "上传账号截图，选择商户；使用 TXT 手机号和随机代理登录，"
-            "复用主界面的超时与询问话术执行询价。"
-        )
+        subtitle = QLabel("独立参数 · 话术共用 · TXT 领取手机号")
         subtitle.setObjectName("CardSub")
-        subtitle.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
-
-        top_row = QHBoxLayout()
-        top_row.setSpacing(12)
-        top_row.addWidget(self._build_config_card(), 1)
-        top_row.addWidget(self._build_quote_card(), 0)
-        layout.addLayout(top_row)
-
-        self.log_panel = LogPanel(
-            self,
-            title="询价日志",
-            subtitle="手机号登录、商家回复与截图评估报价",
-        )
-        layout.addWidget(self.log_panel, 1)
-
-        bottom = QHBoxLayout()
-        bottom.addStretch(1)
         close_btn = QPushButton("关闭")
         close_btn.setObjectName("Ghost")
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         close_btn.clicked.connect(self.close)
-        bottom.addWidget(close_btn)
-        layout.addLayout(bottom)
+        header.addWidget(title)
+        header.addWidget(
+            subtitle, 0, Qt.AlignmentFlag.AlignBottom
+        )
+        header.addStretch(1)
+        header.addWidget(
+            close_btn, 0, Qt.AlignmentFlag.AlignVCenter
+        )
+        layout.addLayout(header)
+
+        content = QHBoxLayout()
+        content.setSpacing(10)
+        content.addWidget(self._build_config_card(), 1)
+
+        right_column = QWidget()
+        right_column.setFixedWidth(380)
+        right_layout = QVBoxLayout(right_column)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
+        right_layout.addWidget(self._build_quote_card(), 0)
+        self.log_panel = LogPanel(
+            self,
+            title="询价日志",
+            subtitle="发送进度与商家回复",
+            view_min_height=80,
+        )
+        right_layout.addWidget(self.log_panel, 1)
+        content.addWidget(right_column, 0)
+        layout.addLayout(content, 1)
+
+        scroll.setWidget(host)
+        outer.addWidget(scroll)
 
     def _build_config_card(self) -> Card:
         config_card = Card(
-            "测试配置", "指定商户、账号截图与账号清单", self
+            "测试配置", "本窗口独立参数 · 询问话术共用", self
         )
-        config_card.body.setSpacing(10)
+        config_card.body.setContentsMargins(12, 10, 12, 10)
+        config_card.body.setSpacing(6)
 
         self.merchant_selector = MerchantSelector(
-            title="指定商户"
+            title="本次咨询商家",
+            list_height=88,
         )
         self.merchant_selector.selectionChanged.connect(
             self._on_manual_selection_changed
         )
         config_card.body.addWidget(self.merchant_selector)
 
-        self.image_uploader = ImageUploader(self._paste_dir, self)
+        config_card.body.addLayout(self._build_parameter_row())
+
+        compact_hint = QLabel(
+            "商户和参数仅本窗口生效；开始后从 TXT 领取 1 个手机号"
+            "并删除该行。同级窗口领取其他号码，话术共用主界面。"
+        )
+        compact_hint.setObjectName("HintLabel")
+        compact_hint.setWordWrap(True)
+        config_card.body.addWidget(compact_hint)
+
+        self.image_uploader = ImageUploader(
+            self._paste_dir, self, compact=True
+        )
         self.image_uploader.imagesChanged.connect(
             self._update_actions
         )
         self.image_uploader.message.connect(self._log)
         config_card.body.addWidget(self.image_uploader)
 
-        account_hint = QLabel(
-            "手机号来自主界面已导入的 TXT 账号清单；"
-            "右上角螃蟹账号仅用于获取商户名称。"
-        )
-        account_hint.setObjectName("HintLabel")
-        account_hint.setWordWrap(True)
-        config_card.body.addWidget(account_hint)
-
         action_row = QHBoxLayout()
         action_row.setSpacing(10)
         self.start_btn = QPushButton("开始询价")
         self.start_btn.setObjectName("Primary")
         self.start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.start_btn.setFixedHeight(42)
+        self.start_btn.setFixedHeight(34)
         self.start_btn.setEnabled(False)
         self.start_btn.clicked.connect(self._start_inquiry)
 
         self.stop_btn = QPushButton("停止")
         self.stop_btn.setObjectName("Danger")
         self.stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.stop_btn.setFixedHeight(38)
+        self.stop_btn.setFixedHeight(30)
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self._stop_inquiry)
 
@@ -190,11 +243,53 @@ class ManualInquiryWindow(QDialog):
         action_row.addWidget(self.stop_btn)
         action_row.addWidget(self.status_label, 1)
         config_card.body.addLayout(action_row)
+        config_card.body.addStretch(1)
         return config_card
+
+    def _build_parameter_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        specs = {spec.key: spec for spec in PARAMETER_FIELDS}
+        for key in _MANUAL_PARAMETER_KEYS:
+            spec = specs[key]
+            field = QWidget()
+            field_layout = QVBoxLayout(field)
+            field_layout.setContentsMargins(0, 0, 0, 0)
+            field_layout.setSpacing(4)
+
+            label = QLabel(spec.label)
+            label.setObjectName("FieldLabel")
+
+            spin = self._create_parameter_spin(spec)
+            spin.setValue(spec.default)
+            self._param_spins[key] = spin
+
+            field_layout.addWidget(label)
+            field_layout.addWidget(spin)
+            row.addWidget(field, 1)
+        return row
+
+    @staticmethod
+    def _create_parameter_spin(
+        spec: SpinFieldSpec,
+    ) -> QSpinBox | QDoubleSpinBox:
+        if spec.decimals:
+            spin: QSpinBox | QDoubleSpinBox = QDoubleSpinBox()
+            spin.setDecimals(spec.decimals)
+            spin.setSingleStep(spec.step)
+            spin.setRange(float(spec.minimum), float(spec.maximum))
+        else:
+            spin = QSpinBox()
+            spin.setRange(int(spec.minimum), int(spec.maximum))
+        spin.setSuffix(spec.suffix)
+        spin.setToolTip(spec.tip)
+        spin.setMinimumHeight(28)
+        spin.setKeyboardTracking(False)
+        return spin
 
     def _build_quote_card(self) -> Card:
         quote_card = Card(
-            "实时报价", "商户与商家评估报价", self
+            "实时报价", "本窗口商户与商家评估报价", self
         )
         quote_card.setFixedWidth(380)
         self.quote_table = QTableWidget(0, 2)
@@ -217,26 +312,35 @@ class ManualInquiryWindow(QDialog):
             1, QHeaderView.ResizeMode.Fixed
         )
         self.quote_table.setColumnWidth(1, 130)
-        self.quote_table.setMinimumHeight(220)
+        self.quote_table.setMinimumHeight(140)
         quote_card.body.addWidget(self.quote_table, 1)
         return quote_card
 
     # ------------------------------------------------------------------
-    # 商户选择同步
+    # 商户选择（仅本窗口）
     # ------------------------------------------------------------------
 
-    def sync_merchants_from_main(self) -> None:
-        if self._syncing_merchants or self.is_busy():
+    def set_available_merchants(
+        self, merchants: Iterable[str]
+    ) -> None:
+        """同步主界面获取到的商家名称，但保留本窗口的勾选状态。"""
+        values = tuple(
+            dict.fromkeys(
+                name.strip()
+                for name in merchants
+                if isinstance(name, str) and name.strip()
+            )
+        )
+        if self.is_busy():
+            self._pending_merchants = values
             return
-        try:
-            merchants = self._merchant_provider()
-            selected = self._selected_merchant_provider()
-        except Exception as exc:
-            self._log(f"同步主界面商户失败：{exc}", "error")
+        if values == self.merchant_selector.merchants():
             return
+
+        selected = self.merchant_selector.selected_merchants()
         self._syncing_merchants = True
         try:
-            self.merchant_selector.set_merchants(merchants, selected)
+            self.merchant_selector.set_merchants(values, selected)
         finally:
             self._syncing_merchants = False
         self._refresh_quote_rows()
@@ -247,7 +351,6 @@ class ManualInquiryWindow(QDialog):
             return
         self._refresh_quote_rows()
         self._update_actions()
-        self.merchantSelectionChanged.emit()
 
     def selected_merchants(self) -> tuple[str, ...]:
         return self.merchant_selector.selected_merchants()
@@ -306,7 +409,12 @@ class ManualInquiryWindow(QDialog):
             value_item = self.quote_table.item(row, 1)
             if value_item is None:
                 continue
-            if value_item.text() in ("待询价", "询价中…"):
+            if value_item.text() in (
+                "待询价",
+                "询价中…",
+                "发送中…",
+                "已发送 · 等回复",
+            ):
                 value_item.setText(text)
                 value_item.setForeground(
                     QBrush(QColor(_QUOTE_COLORS["waiting"]))
@@ -338,6 +446,8 @@ class ManualInquiryWindow(QDialog):
         self.stop_btn.setEnabled(running)
         self.merchant_selector.setEnabled(not running)
         self.image_uploader.setEnabled(not running)
+        for spin in self._param_spins.values():
+            spin.setEnabled(not running)
 
     def _start_inquiry(self) -> None:
         if self.is_busy():
@@ -353,7 +463,7 @@ class ManualInquiryWindow(QDialog):
             self._log("请先添加至少一张账号截图。", "warn")
             return
         account_file = self._account_file_provider()
-        if not account_file:
+        if not account_file or not Path(account_file).is_file():
             self._log(
                 "请先在主界面上传账号 TXT 清单。", "warn"
             )
@@ -366,52 +476,53 @@ class ManualInquiryWindow(QDialog):
             self._log(str(exc), "error")
             self._set_status("配置缺失")
             return
-        try:
-            accounts = read_accounts(
-                account_file, settings.login.default_password
-            )
-        except AccountParseError as exc:
-            self._log(str(exc), "error")
-            self._set_status("账号清单解析失败")
-            return
-        if not accounts:
-            self._log("账号 TXT 中没有可用手机号。", "error")
-            self._set_status("账号清单为空")
-            return
 
         try:
-            params = self._params_provider()
+            phrases = tuple(
+                phrase.strip()
+                for phrase in self._phrase_provider()
+                if isinstance(phrase, str) and phrase.strip()
+            )
         except Exception as exc:
-            self._log(f"读取主界面运行参数失败：{exc}", "error")
+            self._log(f"读取共用询问话术失败：{exc}", "error")
+            self._set_status("询问话术读取失败")
             return
-        phrases = tuple(params.phrases)
         if not phrases:
             self._log(
-                "主界面询问话术为空，本次使用默认话术。", "warn"
+                "主界面询问话术库为空，本次使用默认话术。", "warn"
             )
+
+        timeout = float(self._param_spins["timeout_sec"].value())
+        interval = float(self._param_spins["interval_sec"].value())
 
         self._refresh_quote_rows()
         self._log(
-            f"账号清单：{Path(account_file).name}，"
-            f"{len(accounts)} 个手机号；"
-            f"商户 {len(merchants)} 个；截图 {len(image_paths)} 张。",
+            f"账号清单：{Path(account_file).name}；"
+            "本窗口开始后领取 1 个手机号并从清单中删除。",
+            "info",
+        )
+        self._log(
+            f"本窗口独立参数：单次超时 {timeout:g} 秒 · "
+            f"操作间隔 {interval:g} 秒；商户 {len(merchants)} 个；"
+            f"截图 {len(image_paths)} 张；询问话术与主界面共用"
+            f"（{len(phrases)} 条）。",
             "info",
         )
 
         runner = ManualInquiryRunner(
             settings,
-            accounts,
+            account_file,
             merchants,
             image_paths,
             phrases,
-            float(params.timeout_sec),
-            int(params.threads),
-            float(params.interval_sec),
+            timeout,
+            interval,
             self._log_path,
             self,
         )
         runner.log_message.connect(self._log)
         runner.merchant_started.connect(self._on_merchant_started)
+        runner.merchant_sent.connect(self._on_merchant_sent)
         runner.merchant_quote.connect(self._on_merchant_quote)
         runner.status_message.connect(self._set_status)
         runner.completed.connect(self._on_completed)
@@ -421,11 +532,18 @@ class ManualInquiryWindow(QDialog):
         self.stop_btn.setEnabled(True)
         self.merchant_selector.setEnabled(False)
         self.image_uploader.setEnabled(False)
-        self._set_status("询价中 · 正在登录 TXT 手机号…")
+        for spin in self._param_spins.values():
+            spin.setEnabled(False)
+        self._set_status("询价中 · 正在从 TXT 领取手机号…")
         runner.start()
 
     def _on_merchant_started(self, merchant: str) -> None:
-        self._set_quote_status(merchant, "询价中…", "running")
+        self._set_quote_status(merchant, "发送中…", "running")
+
+    def _on_merchant_sent(self, merchant: str) -> None:
+        self._set_quote_status(
+            merchant, "已发送 · 等回复", "running"
+        )
 
     def _on_merchant_quote(self, quote: object) -> None:
         if not isinstance(quote, ManualMerchantQuote):
@@ -443,6 +561,10 @@ class ManualInquiryWindow(QDialog):
         elif quote.status == "已取消":
             self._set_quote_status(
                 quote.merchant, "已取消", "waiting"
+            )
+        elif quote.status == "已咨询过":
+            self._set_quote_status(
+                quote.merchant, "已咨询过", "no_quote"
             )
         elif quote.error:
             self._set_quote_status(
@@ -468,7 +590,12 @@ class ManualInquiryWindow(QDialog):
         self._runner = None
         if runner is not None:
             runner.deleteLater()
+        pending = self._pending_merchants
+        self._pending_merchants = None
+        self._mark_unfinished_quotes("已结束")
         self._update_actions()
+        if pending is not None:
+            self.set_available_merchants(pending)
         if self._closing:
             QTimer.singleShot(0, self.close)
 

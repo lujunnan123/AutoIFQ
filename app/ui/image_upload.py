@@ -41,12 +41,15 @@ class ImageUploader(QWidget):
         self,
         paste_dir: str | Path,
         parent: QWidget | None = None,
+        *,
+        compact: bool = False,
     ) -> None:
         super().__init__(parent)
         self._paste_dir = Path(paste_dir)
         self._paste_dir.mkdir(parents=True, exist_ok=True)
         self._paths: list[str] = []
         self._paste_counter = 0
+        self._compact = compact
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -96,16 +99,20 @@ class ImageUploader(QWidget):
         toolbar.addWidget(self.clear_btn)
         layout.addLayout(toolbar)
 
-        self.drop_area = _ImageDropArea(self)
+        self.drop_area = _ImageDropArea(self, compact=self._compact)
         self.drop_area.openRequested.connect(self.open_files)
         self.drop_area.filesDropped.connect(self.add_paths)
         layout.addWidget(self.drop_area)
 
+        icon_size = QSize(72, 48) if self._compact else QSize(96, 64)
+        grid_size = QSize(102, 72) if self._compact else QSize(126, 96)
+        list_height = 92 if self._compact else 138
+
         self.list_widget = QListWidget()
         self.list_widget.setObjectName("ManualImageList")
         self.list_widget.setViewMode(QListView.ViewMode.IconMode)
-        self.list_widget.setIconSize(QSize(96, 64))
-        self.list_widget.setGridSize(QSize(126, 96))
+        self.list_widget.setIconSize(icon_size)
+        self.list_widget.setGridSize(grid_size)
         self.list_widget.setMovement(QListView.Movement.Static)
         self.list_widget.setResizeMode(QListView.ResizeMode.Adjust)
         self.list_widget.setSelectionMode(
@@ -114,7 +121,7 @@ class ImageUploader(QWidget):
         self.list_widget.setSpacing(4)
         self.list_widget.setWordWrap(True)
         self.list_widget.setTextElideMode(Qt.TextElideMode.ElideMiddle)
-        self.list_widget.setFixedHeight(138)
+        self.list_widget.setFixedHeight(list_height)
         self.list_widget.itemSelectionChanged.connect(
             self._update_buttons
         )
@@ -161,9 +168,9 @@ class ImageUploader(QWidget):
                     f"无法加载图片：{path.name}", "warn"
                 )
                 continue
+            icon_size = self.list_widget.iconSize()
             icon_pixmap = pixmap.scaled(
-                96,
-                64,
+                icon_size,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
@@ -277,15 +284,25 @@ class _ImageDropArea(QFrame):
     openRequested = pyqtSignal()
     filesDropped = pyqtSignal(list)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        compact: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("ImageDropArea")
         self.setAcceptDrops(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(72)
+        self.setMinimumHeight(52 if compact else 72)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setContentsMargins(
+            10 if compact else 14,
+            6 if compact else 10,
+            10 if compact else 14,
+            6 if compact else 10,
+        )
         layout.setSpacing(12)
 
         text_col = QVBoxLayout()
@@ -296,6 +313,7 @@ class _ImageDropArea(QFrame):
             "支持多张 PNG / JPG / JPEG / WEBP / BMP，最多 20 张"
         )
         hint.setObjectName("FileMeta")
+        hint.setVisible(not compact)
         text_col.addWidget(title)
         text_col.addWidget(hint)
         text_col.addStretch(1)

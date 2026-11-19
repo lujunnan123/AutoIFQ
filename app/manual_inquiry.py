@@ -1,8 +1,7 @@
-"""手动询价后台任务：TXT 手机号 + 代理登录，再执行商户聊天询价。"""
+"""手动询价：TXT 领取一个手机号，先批量发送，再轮询商家回复。"""
 
 from __future__ import annotations
 
-import queue
 import random
 import threading
 import time
@@ -11,8 +10,14 @@ from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from .services.account_claim import (
+    AccountClaimError,
+    claim_account,
+    release_account,
+)
 from .services.accounts import Account
 from .services.consult_history import (
+    HISTORY_LOCK,
     ConsultHistoryStore,
     ConsultHistoryStoreError,
 )
@@ -20,7 +25,11 @@ from .services.manual_log import (
     ManualLogError,
     append_manual_inquiry_log,
 )
-from .services.phone_login import login_phone
+from .services.phone_login import (
+    is_proxy_login_error,
+    login_phone,
+    proxy_error_hint,
+)
 from .services.phone_parser import mask_phone
 from .services.proxy_provider import (
     ProxyPool,
@@ -29,12 +38,16 @@ from .services.proxy_provider import (
     ProxyStoreError,
 )
 from .services.pxb7_chat import (
+    PendingChatInquiry,
     PhoneSession,
     Pxb7ChatCancelled,
     Pxb7ChatService,
 )
 from .services.pxb7_yd_token import Pxb7BrowserYdTokenProvider
 from .settings import AppSettings
+
+_REPLY_POLL_INTERVAL = 2.0
+_PROXY_LOGIN_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -51,8 +64,11 @@ class ManualMerchantQuote:
 
 
 class ManualInquiryRunner(QThread):
+    """一个手动窗口使用一个从 TXT 领取的手机号，窗口内严格串行。"""
+
     log_message = pyqtSignal(str, str)
     merchant_started = pyqtSignal(str)
+    merchant_sent = pyqtSignal(str)
     merchant_quote = pyqtSignal(object)
     status_message = pyqtSignal(str)
     completed = pyqtSignal(bool, str)
@@ -60,24 +76,22 @@ class ManualInquiryRunner(QThread):
     def __init__(
         self,
         settings: AppSettings,
-        accounts: list[Account],
+        account_file: str | Path,
         merchants: list[str],
         image_paths: list[Path],
         phrases: tuple[str, ...],
         timeout: float,
-        threads: int,
         interval: float,
         log_path: str | Path | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._settings = settings
-        self._accounts = list(accounts)
+        self._account_file = Path(account_file)
         self._merchants = list(merchants)
         self._image_paths = [Path(path) for path in image_paths]
         self._phrases = tuple(phrases)
         self._timeout = max(1.0, float(timeout))
-        self._threads = max(1, min(int(threads), max(1, len(self._accounts))))
         self._interval = max(0.0, float(interval))
         self._log_path = Path(log_path) if log_path else None
         self._cancel = threading.Event()
@@ -91,9 +105,9 @@ class ManualInquiryRunner(QThread):
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        if not self._accounts or not self._merchants:
-            self._log("缺少手机号或商户，无法执行手动询价。", "error")
-            self.completed.emit(False, "缺少手机号或商户")
+        if not self._merchants:
+            self._log("缺少商户，无法执行手动询价。", "error")
+            self.completed.emit(False, "缺少商户")
             return
         if not self._image_paths:
             self._log("缺少账号截图，无法执行手动询价。", "error")
@@ -101,107 +115,130 @@ class ManualInquiryRunner(QThread):
             return
 
         self._log(
-            f"开始手动询价：{len(self._accounts)} 个 TXT 手机号，"
-            f"{len(self._merchants)} 个商户，{len(self._image_paths)} 张截图。",
+            f"开始手动询价：{len(self._merchants)} 个商户，"
+            f"{len(self._image_paths)} 张截图；"
+            "本窗口从 TXT 领取 1 个手机号。",
             "accent",
         )
-        self.status_message.emit("正在登录 TXT 手机号…")
+        self.status_message.emit("正在从 TXT 领取手机号…")
 
-        sessions = self._login_accounts()
+        login = self._login_from_txt()
         if self._cancel.is_set():
-            self._log("手动询价已停止。", "warn")
-            self.completed.emit(False, "已停止")
+            error = "手动询价已停止"
+            self._log(error, "warn")
+            self._record_remaining(
+                self._merchants, set(), "已取消", error, ""
+            )
+            self.completed.emit(False, error)
             return
-        if not sessions:
-            self._log("没有成功的手机号登录会话，无法询价。", "error")
-            self._finish_without_sessions()
+        if login is None:
+            self._finish_without_login()
             return
 
+        session, account = login
+        masked_phone = mask_phone(account.phone)
         self._log(
-            f"手机号登录完成：{len(sessions)} 个会话可用，开始商户询价。",
+            f"本窗口使用手机号 {masked_phone}；"
+            "该手机号已从 TXT 删除，同级窗口不会重复领取。",
             "success",
         )
-        self.status_message.emit("手机号登录完成，正在询价…")
+        self.status_message.emit(
+            f"手机号 {masked_phone} 登录完成，准备发送询价…"
+        )
 
-        try:
-            history = self._history_store.load()
-        except ConsultHistoryStoreError as exc:
-            self._log(
-                f"咨询历史读取失败：{exc}；本次按空历史执行。", "warn"
-            )
-            history = {}
-
-        phone_order = [
-            account.phone
-            for account in self._accounts
-            if account.phone in sessions
-        ]
-
-        # 与主流程一致：先按手机号分配商户，再复用同一聊天会话逐条询价。
-        assignments: dict[str, list[str]] = {
-            phone: [] for phone in phone_order
-        }
-        skipped: list[str] = []
-        for merchant in self._merchants:
-            phone = self._choose_phone(merchant, phone_order, history)
-            if phone is None:
-                skipped.append(merchant)
-                continue
-            history.setdefault(phone, set()).add(merchant)
-            assignments[phone].append(merchant)
-        self._save_history(history)
-
+        to_send, skipped = self._assign_history(account.phone)
+        recorded: set[str] = set()
         for merchant in skipped:
-            error = "没有可用于该商户的手机号（均已咨询过或登录失败）"
+            error = "该手机号已咨询过此商户，跳过"
             self._log(f"跳过商户「{merchant}」：{error}", "warn")
             self._record_quote(
                 ManualMerchantQuote(
                     merchant=merchant,
-                    phone="",
+                    phone=masked_phone,
                     phrase="",
                     price=None,
                     replies=(),
-                    status="失败",
+                    status="已咨询过",
                     elapsed=0.0,
                     log_path=self._log_path,
                     error=error,
                 )
             )
+            recorded.add(merchant)
 
+        if not to_send:
+            summary = "手动询价完成 · 所有商户均已咨询过"
+            self._log(summary, "warn")
+            self.completed.emit(True, summary)
+            return
+
+        pendings: list[PendingChatInquiry] = []
         quoted = 0
-        for phone in phone_order:
-            tasks = assignments.get(phone) or []
-            if not tasks:
-                continue
-            if self._cancel.is_set():
-                break
-            masked_phone = mask_phone(phone)
-            self._log(
-                f"手机号 {masked_phone}：分配 {len(tasks)} 个商户询价任务。",
-                "info",
+        fatal_error = ""
+        service = Pxb7ChatService(
+            self._settings,
+            self._log,
+            session=session,
+        )
+        try:
+            service.__enter__()
+        except Pxb7ChatCancelled:
+            error = "手动询价已停止"
+            self._record_remaining(
+                to_send, recorded, "已取消", error, masked_phone
             )
-            service = Pxb7ChatService(
-                self._settings,
-                self._log,
-                session=sessions[phone],
+            self._log(error, "warn")
+            self.completed.emit(False, error)
+            return
+        except Exception as exc:
+            error = f"聊天会话启动失败：{exc}"
+            self._record_remaining(
+                to_send, recorded, "失败", error, masked_phone
             )
-            try:
-                service.__enter__()
-            except Pxb7ChatCancelled:
-                break
-            except Exception as exc:
-                error = f"聊天会话启动失败：{exc}"
-                self._log(
-                    f"手机号 {masked_phone} {error}；"
-                    "该手机号任务全部跳过。",
-                    "warn",
+            self._log(error, "error")
+            self.completed.emit(False, error)
+            return
+
+        try:
+            # 第一阶段：先给每个商户发送询价信息，聊天窗口保持打开。
+            for merchant in to_send:
+                if self._cancel.is_set():
+                    break
+                self.merchant_started.emit(merchant)
+                phrase = (
+                    random.choice(self._phrases) if self._phrases else ""
                 )
-                for merchant in tasks:
+                self._log(
+                    f"商户「{merchant}」使用手机号 {masked_phone} "
+                    "发送询价…",
+                    "info",
+                )
+                if phrase:
+                    self._log(f"本次话术：{phrase}", "muted")
+                sent_count = len(pendings) + 1
+                self.status_message.emit(
+                    f"正在发送 {sent_count}/{len(to_send)} · {merchant}"
+                )
+
+                try:
+                    pending = service.start_inquiry(
+                        merchant,
+                        self._image_paths,
+                        phrase,
+                        self._cancel,
+                    )
+                except Pxb7ChatCancelled:
+                    raise
+                except Exception as exc:
+                    error = str(exc)
+                    self._log(
+                        f"商户「{merchant}」发送失败：{error}", "error"
+                    )
                     self._record_quote(
                         ManualMerchantQuote(
                             merchant=merchant,
                             phone=masked_phone,
-                            phrase="",
+                            phrase=phrase,
                             price=None,
                             replies=(),
                             status="失败",
@@ -210,173 +247,163 @@ class ManualInquiryRunner(QThread):
                             error=error,
                         )
                     )
-                continue
+                    recorded.add(merchant)
+                    continue
 
+                pendings.append(pending)
+                self.merchant_sent.emit(merchant)
+                self._log(
+                    f"已向商户「{merchant}」发送，继续处理下一家。",
+                    "info",
+                )
+                if not self._sleep_interval():
+                    break
+
+            # 第二阶段：所有发送完成后，轮流检查各聊天窗口的新回复。
+            if pendings and not self._cancel.is_set():
+                self._log(
+                    f"已向 {len(pendings)} 家商户发送完成，"
+                    f"开始轮询回复；单家最多等待 {int(self._timeout)} 秒。",
+                    "accent",
+                )
+                self.status_message.emit(
+                    f"已发送 {len(pendings)} 家，正在监测回复…"
+                )
+                quoted += self._monitor(
+                    service, pendings, masked_phone, recorded
+                )
+        except Pxb7ChatCancelled:
+            self._log("手动询价已停止。", "warn")
+        except Exception as exc:
+            fatal_error = str(exc)
+            self._log(f"手动询价异常：{fatal_error}", "error")
+        finally:
+            for pending in pendings:
+                service.close_pending(pending)
             try:
-                for merchant in tasks:
-                    if self._cancel.is_set():
-                        break
-                    quote = self._inquire_merchant(
-                        service, merchant, phone, masked_phone
-                    )
-                    self._record_quote(quote)
-                    if quote.price is not None:
-                        quoted += 1
-                    if self._cancel.is_set():
-                        break
-                    if not self._sleep_interval():
-                        break
-            except Pxb7ChatCancelled:
-                self._log("手动询价已停止。", "warn")
-                break
-            finally:
-                try:
-                    service.__exit__(None, None, None)
-                except Exception:
-                    pass
+                service.__exit__(None, None, None)
+            except Exception:
+                pass
 
-            if self._cancel.is_set():
-                break
-
-        cancelled = self._cancel.is_set()
-        if cancelled:
+        if self._cancel.is_set():
+            self._record_remaining(
+                to_send,
+                recorded,
+                "已取消",
+                "手动询价已停止",
+                masked_phone,
+            )
             summary = "手动询价已停止"
             self._log(summary, "warn")
             self.completed.emit(False, summary)
+        elif fatal_error:
+            self._record_remaining(
+                to_send, recorded, "失败", fatal_error, masked_phone
+            )
+            summary = f"手动询价异常：{fatal_error}"
+            self.completed.emit(False, summary)
         else:
+            self._record_remaining(
+                to_send,
+                recorded,
+                "失败",
+                "未执行完成",
+                masked_phone,
+            )
             summary = (
-                f"手动询价完成 · {quoted}/{len(self._merchants)} 个商户有报价"
+                f"手动询价完成 · {quoted}/{len(self._merchants)}"
+                " 个商户有报价"
             )
             level = "success" if quoted else "warn"
             self._log(summary, level)
             self.completed.emit(True, summary)
 
-    def _inquire_merchant(
+    # ------------------------------------------------------------------
+    # 手机号领取 / 登录
+    # ------------------------------------------------------------------
+
+    def _login_from_txt(
         self,
-        service: Pxb7ChatService,
-        merchant: str,
-        phone: str,
-        masked_phone: str,
-    ) -> ManualMerchantQuote:
-        phrase = random.choice(self._phrases) if self._phrases else ""
-        self.merchant_started.emit(merchant)
-        self._log(
-            f"商户「{merchant}」使用手机号 {masked_phone} 询价…",
-            "info",
-        )
-        if phrase:
-            self._log(f"本次话术：{phrase}", "muted")
-        self.status_message.emit(
-            f"商户「{merchant}」询价中 · {masked_phone}"
-        )
-
-        started = time.monotonic()
-        result = None
-        error = ""
-        try:
-            result = service.inquire(
-                merchant,
-                self._image_paths,
-                phrase,
-                self._timeout,
-                self._cancel,
-            )
-        except Pxb7ChatCancelled:
-            raise
-        except Exception as exc:
-            error = str(exc)
-            self._log(
-                f"商户「{merchant}」询价失败：{error}", "error"
-            )
-
-        elapsed = time.monotonic() - started
-        price = result.price if result is not None else None
-        replies = result.replies if result is not None else ()
-        if self._cancel.is_set():
-            status = "已取消"
-        elif error:
-            status = "失败"
-        elif price is not None:
-            status = "有报价"
-        else:
-            status = "未报价"
-        return ManualMerchantQuote(
-            merchant=merchant,
-            phone=masked_phone,
-            phrase=phrase,
-            price=price,
-            replies=tuple(replies),
-            status=status,
-            elapsed=elapsed,
-            log_path=self._log_path,
-            error=error,
-        )
-
-    # ------------------------------------------------------------------
-    # 手机号登录
-    # ------------------------------------------------------------------
-
-    def _login_accounts(self) -> dict[str, PhoneSession]:
+    ) -> tuple[PhoneSession, Account] | None:
         proxy_settings = ProxySettings()
         try:
             proxy_settings = ProxyStore().load()
         except ProxyStoreError as exc:
             self._log(
-                f"代理设置读取失败：{exc}；为避免直连，将跳过手机号登录。",
+                f"代理设置读取失败：{exc}；为避免直连，将停止登录。",
                 "error",
             )
-            proxy_settings = ProxySettings(
-                enabled=True, api_url="", fetch_count=5, timeout_sec=20.0
-            )
+            return None
 
         proxy_pool: ProxyPool | None = None
         if proxy_settings.enabled:
             proxy_pool = ProxyPool(proxy_settings, self._log)
-            self._log(
-                "手动询价手机号登录已启用随机代理。", "warn"
-            )
+            self._log("本窗口手机号登录已启用随机代理。", "warn")
         else:
-            self._log(
-                "代理未启用，手动询价手机号将直连登录。", "warn"
-            )
+            self._log("代理未启用，本窗口手机号将直连登录。", "warn")
 
         provider = Pxb7BrowserYdTokenProvider(
             self._settings.pxb7, self._settings.login, self._log
         )
-        sessions: dict[str, PhoneSession] = {}
-        sessions_lock = threading.Lock()
-        work_queue: queue.Queue = queue.Queue()
-        for account in self._accounts:
-            work_queue.put(account)
 
-        def worker() -> None:
+        def acquire_proxy():
+            if not proxy_settings.enabled:
+                return None
+            if proxy_pool is None:
+                raise RuntimeError("代理池未初始化")
+            self._log("正在获取随机代理…", "info")
+            try:
+                proxy = proxy_pool.acquire()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"代理获取失败：{exc}"
+                ) from exc
+            self._log(f"使用代理：{proxy.display()}", "info")
+            return proxy
+
+        while not self._cancel.is_set():
+            # 先获取代理再领取手机号；代理接口失败不消耗 TXT 账号。
+            try:
+                proxy = acquire_proxy()
+            except RuntimeError as exc:
+                self._log(
+                    f"{exc}；为避免直连，已停止领取手机号。",
+                    "error",
+                )
+                return None
+
+            try:
+                account = claim_account(
+                    self._account_file,
+                    self._settings.login.default_password,
+                )
+            except AccountClaimError as exc:
+                self._log(str(exc), "error")
+                return None
+            if account is None:
+                self._log(
+                    "TXT 中没有可领取的手机号：可能已被其他窗口领取或清单为空。",
+                    "error",
+                )
+                return None
+
+            masked = mask_phone(account.phone)
+            self._log(
+                f"已从 TXT 领取手机号 {masked}，并从清单中删除。",
+                "info",
+            )
+
+            attempts = 0
+            max_attempts = (
+                _PROXY_LOGIN_ATTEMPTS if proxy is not None else 1
+            )
             while not self._cancel.is_set():
-                try:
-                    account = work_queue.get_nowait()
-                except queue.Empty:
-                    return
-                masked = mask_phone(account.phone)
-                proxy = None
-                if proxy_settings.enabled:
-                    self._log(
-                        f"手机号 {masked} 正在获取随机代理…", "info"
-                    )
-                    try:
-                        if proxy_pool is None:
-                            raise RuntimeError("代理池未初始化")
-                        proxy = proxy_pool.acquire()
-                    except Exception as exc:
-                        self._log(
-                            f"手机号 {masked} 代理获取失败：{exc}；"
-                            "跳过该手机号，不使用直连。",
-                            "error",
-                        )
-                        continue
-                    self._log(
-                        f"手机号 {masked} 使用代理：{proxy.display()}",
-                        "info",
-                    )
-                self._log(f"手机号 {masked} 正在登录螃蟹平台…", "info")
+                attempts += 1
+                self._log(
+                    f"手机号 {masked} 正在登录螃蟹平台"
+                    f"（第 {attempts}/{max_attempts} 次尝试）…",
+                    "info",
+                )
 
                 def on_step(progress: float, detail: str) -> None:
                     if progress in (5.0, 55.0):
@@ -394,64 +421,123 @@ class ManualInquiryRunner(QThread):
                         on_step,
                     )
                 except Exception as exc:
+                    message = str(exc)
                     self._log(
-                        f"手机号 {masked} 登录失败：{exc}", "error"
+                        f"手机号 {masked} 登录失败：{message}",
+                        "error",
                     )
-                    continue
+                    if self._cancel.is_set():
+                        self._release_account(account, masked)
+                        return None
+
+                    if is_proxy_login_error(exc):
+                        hint = proxy_error_hint(exc)
+                        if proxy is None:
+                            self._log(
+                                f"直连网络异常：{hint}；"
+                                "手机号已放回 TXT。",
+                                "error",
+                            )
+                            self._release_account(account, masked)
+                            return None
+                        if attempts < max_attempts:
+                            self._log(
+                                f"代理线路异常：{hint}；"
+                                "更换代理后重试同一手机号…",
+                                "warn",
+                            )
+                            try:
+                                proxy = acquire_proxy()
+                            except RuntimeError as proxy_exc:
+                                self._log(
+                                    f"{proxy_exc}；手机号已放回 TXT，"
+                                    "停止本窗口登录。",
+                                    "error",
+                                )
+                                self._release_account(
+                                    account, masked
+                                )
+                                return None
+                            continue
+
+                        self._log(
+                            f"手机号 {masked} 连续 {attempts} 次"
+                            f"代理登录失败：{hint}；"
+                            "手机号已放回 TXT。请检查代理白名单、"
+                            "有效期或更换代理接口。",
+                            "error",
+                        )
+                        self._release_account(account, masked)
+                        return None
+
+                    # 非代理问题（例如账号密码错误）：跳过该手机号，
+                    # 继续领取下一个。
+                    break
+
                 if login.session is None:
                     self._log(
-                        f"手机号 {masked} 未取得聊天会话，已跳过。",
+                        f"手机号 {masked} 未取得聊天会话，"
+                        "继续领取下一个。",
                         "warn",
                     )
-                    continue
-                with sessions_lock:
-                    sessions[account.phone] = login.session
+                    break
+
                 self._log(
                     f"手机号 {masked} 登录成功 · 用户名："
                     f"{login.username}",
                     "success",
                 )
+                return login.session, account
 
-        workers = [
-            threading.Thread(target=worker, daemon=True)
-            for _ in range(min(self._threads, len(self._accounts)))
-        ]
-        for thread in workers:
-            thread.start()
-        for thread in workers:
-            thread.join()
-        return sessions
-
-    def _finish_without_sessions(self) -> None:
-        for merchant in self._merchants:
-            quote = ManualMerchantQuote(
-                merchant=merchant,
-                phone="",
-                phrase="",
-                price=None,
-                replies=(),
-                status="失败",
-                elapsed=0.0,
-                log_path=self._log_path,
-                error="没有可用的手机号登录会话",
-            )
-            self._record_quote(quote)
-        self.completed.emit(False, "没有可用的手机号登录会话")
-
-    # ------------------------------------------------------------------
-    # 历史 / 日志
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _choose_phone(
-        merchant: str,
-        phone_order: list[str],
-        history: dict[str, set[str]],
-    ) -> str | None:
-        for phone in phone_order:
-            if merchant not in history.get(phone, set()):
-                return phone
         return None
+
+    def _release_account(self, account: Account, masked: str) -> None:
+        try:
+            restored = release_account(self._account_file, account)
+        except AccountClaimError as exc:
+            self._log(
+                f"手机号 {masked} 放回 TXT 失败：{exc}", "warn"
+            )
+            return
+        if restored:
+            self._log(
+                f"已将手机号 {masked} 放回 TXT，未消耗该账号。",
+                "warn",
+            )
+        else:
+            self._log(
+                f"手机号 {masked} 已存在于 TXT，无需重复放回。",
+                "muted",
+            )
+
+    # ------------------------------------------------------------------
+    # 咨询历史
+    # ------------------------------------------------------------------
+
+    def _assign_history(
+        self, phone: str
+    ) -> tuple[list[str], list[str]]:
+        with HISTORY_LOCK:
+            try:
+                history = self._history_store.load()
+            except ConsultHistoryStoreError as exc:
+                self._log(
+                    f"咨询历史读取失败：{exc}；本次按空历史执行。",
+                    "warn",
+                )
+                history = {}
+
+            to_send: list[str] = []
+            skipped: list[str] = []
+            for merchant in self._merchants:
+                if merchant in history.get(phone, set()):
+                    skipped.append(merchant)
+                else:
+                    to_send.append(merchant)
+            if to_send:
+                history.setdefault(phone, set()).update(to_send)
+                self._save_history(history)
+            return to_send, skipped
 
     def _save_history(self, history: dict[str, set[str]]) -> None:
         try:
@@ -462,7 +548,163 @@ class ManualInquiryRunner(QThread):
                 "warn",
             )
 
+    # ------------------------------------------------------------------
+    # 回复监测
+    # ------------------------------------------------------------------
+
+    def _monitor(
+        self,
+        service: Pxb7ChatService,
+        pendings: list[PendingChatInquiry],
+        masked_phone: str,
+        recorded: set[str],
+    ) -> int:
+        quoted = 0
+        remaining = list(pendings)
+
+        while remaining and not self._cancel.is_set():
+            now = time.monotonic()
+            for pending in list(remaining):
+                if self._cancel.is_set():
+                    break
+                merchant = pending.merchant_name
+                try:
+                    price = service.poll_pending(
+                        pending, self._cancel
+                    )
+                except Pxb7ChatCancelled:
+                    raise
+                except Exception as exc:
+                    error = str(exc)
+                    self._log(
+                        f"商户「{merchant}」读取回复失败：{error}",
+                        "error",
+                    )
+                    self._record_pending(
+                        pending,
+                        masked_phone,
+                        "失败",
+                        error,
+                        recorded,
+                    )
+                    remaining.remove(pending)
+                    continue
+
+                if price is not None:
+                    self._record_pending(
+                        pending,
+                        masked_phone,
+                        "有报价",
+                        "",
+                        recorded,
+                        price=price,
+                    )
+                    quoted += 1
+                    remaining.remove(pending)
+                    self._log(
+                        f"商户「{merchant}」报价：{price:g}",
+                        "success",
+                    )
+                elif now >= pending.sent_at + self._timeout:
+                    self._record_pending(
+                        pending,
+                        masked_phone,
+                        "未报价",
+                        "",
+                        recorded,
+                    )
+                    remaining.remove(pending)
+                    self._log(
+                        f"商户「{merchant}」在 {int(self._timeout)} "
+                        "秒内未给出可识别报价。",
+                        "warn",
+                    )
+
+            if remaining and not self._sleep_poll(
+                _REPLY_POLL_INTERVAL
+            ):
+                break
+
+        if remaining and self._cancel.is_set():
+            for pending in remaining:
+                self._record_pending(
+                    pending,
+                    masked_phone,
+                    "已取消",
+                    "手动询价已停止",
+                    recorded,
+                )
+        return quoted
+
+    def _record_pending(
+        self,
+        pending: PendingChatInquiry,
+        masked_phone: str,
+        status: str,
+        error: str,
+        recorded: set[str],
+        *,
+        price: float | int | None = None,
+    ) -> None:
+        if pending.merchant_name in recorded:
+            return
+        self._record_quote(
+            ManualMerchantQuote(
+                merchant=pending.merchant_name,
+                phone=masked_phone,
+                phrase=pending.phrase,
+                price=price,
+                replies=tuple(pending.replies),
+                status=status,
+                elapsed=time.monotonic() - pending.started_at,
+                log_path=self._log_path,
+                error=error,
+            )
+        )
+        recorded.add(pending.merchant_name)
+
+    # ------------------------------------------------------------------
+    # 完成 / 日志
+    # ------------------------------------------------------------------
+
+    def _finish_without_login(self) -> None:
+        error = (
+            "TXT 中没有可领取手机号，或领取的手机号均登录失败"
+        )
+        self._log(error, "error")
+        self._record_remaining(
+            self._merchants, set(), "失败", error, ""
+        )
+        self.completed.emit(False, error)
+
+    def _record_remaining(
+        self,
+        merchants: list[str],
+        recorded: set[str],
+        status: str,
+        error: str,
+        phone: str,
+    ) -> None:
+        for merchant in merchants:
+            if merchant in recorded:
+                continue
+            self._record_quote(
+                ManualMerchantQuote(
+                    merchant=merchant,
+                    phone=phone,
+                    phrase="",
+                    price=None,
+                    replies=(),
+                    status=status,
+                    elapsed=0.0,
+                    log_path=self._log_path,
+                    error=error,
+                )
+            )
+            recorded.add(merchant)
+
     def _record_quote(self, quote: ManualMerchantQuote) -> None:
+        first_write = self._log_path is None
         try:
             self._log_path = append_manual_inquiry_log(
                 self._log_path,
@@ -488,7 +730,10 @@ class ManualInquiryRunner(QThread):
                 log_path=self._log_path,
                 error=quote.error,
             )
-            self._log(f"询价日志表格：{self._log_path}", "info")
+            if first_write:
+                self._log(
+                    f"询价日志表格：{self._log_path}", "info"
+                )
         except ManualLogError as exc:
             self._log(
                 f"询价日志表格保存失败：{exc}", "error"
@@ -496,7 +741,10 @@ class ManualInquiryRunner(QThread):
         self.merchant_quote.emit(quote)
 
     def _sleep_interval(self) -> bool:
-        end = time.monotonic() + self._interval
+        return self._sleep_poll(self._interval)
+
+    def _sleep_poll(self, seconds: float) -> bool:
+        end = time.monotonic() + max(0.0, seconds)
         while time.monotonic() < end:
             if self._cancel.is_set():
                 return False

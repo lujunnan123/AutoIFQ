@@ -19,6 +19,7 @@ class LogPanel(Card):
         *,
         title: str = "运行日志",
         subtitle: str = "实时输出每一步的执行信息",
+        view_min_height: int = 120,
     ) -> None:
         super().__init__(title, subtitle, parent)
 
@@ -33,7 +34,7 @@ class LogPanel(Card):
         self.view.setReadOnly(True)
         self.view.setMaximumBlockCount(2000)
         self.view.setPlaceholderText("等待运行…")
-        self.view.setMinimumHeight(120)
+        self.view.setMinimumHeight(max(60, int(view_min_height)))
         self.body.addWidget(self.view, 1)
 
     def append(self, message: str, level: str = "info") -> None:
