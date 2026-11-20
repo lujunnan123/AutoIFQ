@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -25,12 +27,14 @@ from ..constants import (
     StepStatus,
     WINDOW_TITLE,
 )
+from ..feishu_data_runner import FeishuDataRunner
 from ..feishu_login import FeishuLoginRunner
 from ..models import RunParams, RunState
 from ..pxb7_login import Pxb7LoginRunner
 from ..runner import LoginRunner
 from ..services.accounts import AccountParseError, read_accounts
 from ..services.feishu_common import feishu_logged_in
+from ..services.feishu_table import FeishuTableData
 from ..services.merchant_store import MerchantStore, MerchantStoreError
 from ..services.parameter_store import ParameterStore, ParameterStoreError
 from ..services.phrase_store import PhraseStore, PhraseStoreError
@@ -39,6 +43,7 @@ from ..services.pxb7_merchant import state_available
 from ..settings import SettingsError, load_settings
 from ..utils import fmt_size
 from .action_panel import ActionPanel
+from .feishu_filter_dialog import FeishuFilterDialog
 from .header_bar import HeaderBar
 from .log_panel import LogPanel
 from .manual_inquiry_window import ManualInquiryWindow
@@ -73,8 +78,14 @@ class MainWindow(QMainWindow):
         self._manual_inquiry_windows: list[ManualInquiryWindow] = []
         self._manual_window_sequence = 0
         self._feishu_login_runner: FeishuLoginRunner | None = None
+        self._feishu_data_runner: FeishuDataRunner | None = None
         self._pxb7_login_runner: Pxb7LoginRunner | None = None
         self._pxb7_ready = False
+        self._pending_accounts: list = []
+        self._pending_threads = 0
+        self._pending_settings = None
+        self._pending_params: RunParams | None = None
+        self._feishu_data_cancelled = False
 
         self._merchant_store = merchant_store or MerchantStore()
         self._proxy_store = proxy_store or ProxyStore()
@@ -773,6 +784,12 @@ class MainWindow(QMainWindow):
         if self.runner is not None and self.runner.isRunning():
             return
         if (
+            self._feishu_data_runner is not None
+            and self._feishu_data_runner.isRunning()
+        ):
+            self.log("正在读取飞书数据，请稍候。", "warn")
+            return
+        if (
             self._feishu_login_runner is not None
             and self._feishu_login_runner.isRunning()
         ):
@@ -845,20 +862,129 @@ class MainWindow(QMainWindow):
         params = self.collect_params()
         threads = max(1, min(params.threads, len(accounts)))
 
+        self._pending_accounts = list(accounts)
+        self._pending_threads = threads
+        self._pending_settings = settings
+        self._pending_params = params
+        self._feishu_data_cancelled = False
+
         self.progress_panel.reset()
         self.progress_panel.set_build_status(
             "running", "正在读取飞书多维表格…"
         )
-        self.progress_panel.set_chip("构建中", "running")
+        self.progress_panel.set_chip("读取中", "running")
         self._set_run_state(RunState.RUNNING)
+        self.action_panel.pause_btn.setEnabled(False)
 
-        self.set_status("运行中 · 正在读取飞书表格并构建")
+        self.set_status("运行中 · 正在读取飞书数据，稍后进行筛选")
 
         self._login_summary_received = False
         self._build_result = None
         self._inquiry_summary = None
+
+        runner = FeishuDataRunner(settings, self)
+        runner.log_message.connect(self.log)
+        runner.data_ready.connect(self._on_feishu_data_ready)
+        runner.failed.connect(self._on_feishu_data_failed)
+        runner.finished.connect(self._on_feishu_data_finished)
+        self._feishu_data_runner = runner
+        runner.start()
+
+    def _on_feishu_data_ready(self, data: object) -> None:
+        if not isinstance(data, FeishuTableData):
+            self._on_feishu_data_failed("飞书数据格式异常")
+            return
+        if self._feishu_data_cancelled:
+            self._cleanup_filter_temp(data.temp_dir)
+            return
+        if not data.records:
+            self._cleanup_filter_temp(data.temp_dir)
+            self._reset_after_filter_cancel(
+                "飞书表格没有可筛选的记录"
+            )
+            return
+
+        params = self._pending_params
+        if params is None:
+            self._cleanup_filter_temp(data.temp_dir)
+            self._reset_after_filter_cancel("缺少待执行的运行参数")
+            return
+
+        dialog = FeishuFilterDialog(
+            data,
+            self,
+            merchant_count=len(params.merchants),
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self._cleanup_filter_temp(data.temp_dir)
+            self._reset_after_filter_cancel("已取消飞书数据筛选")
+            return
+
+        selected = dialog.selected_data()
+        if selected is None or not selected.records:
+            self._cleanup_filter_temp(data.temp_dir)
+            self._reset_after_filter_cancel("筛选后没有可询价记录")
+            return
+
+        no_images = sum(
+            1
+            for record in selected.records
+            if not (record.has_images or record.screenshots)
+        )
+        message = (
+            f"将处理 {len(selected.records)} 条飞书记录 × "
+            f"{len(params.merchants)} 个咨询商家。"
+        )
+        if no_images:
+            message += (
+                f"\n其中 {no_images} 条没有账号内容图片，"
+                "聊天阶段会自动跳过。"
+            )
+        message += "\n\n是否确认开始询价？"
+        reply = QMessageBox.question(
+            self,
+            "确认开始询价",
+            message,
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            self._cleanup_filter_temp(data.temp_dir)
+            self._reset_after_filter_cancel("已取消询价确认")
+            return
+
+        self.log(
+            f"用户确认筛选结果：{len(selected.records)} 条记录，"
+            f"{len(params.merchants)} 个商家。",
+            "accent",
+        )
+        self._start_login_runner(selected)
+
+    def _start_login_runner(self, source: FeishuTableData) -> None:
+        accounts = list(self._pending_accounts)
+        threads = int(self._pending_threads)
+        settings = self._pending_settings
+        params = self._pending_params
+        if not accounts or settings is None or params is None:
+            self._cleanup_filter_temp(source.temp_dir)
+            self._reset_after_filter_cancel("启动参数已失效")
+            return
+
+        self.progress_panel.set_build_status(
+            "running", "正在构建筛选后的询价表格…"
+        )
+        self.progress_panel.set_chip("构建中", "running")
+        self.action_panel.pause_btn.setEnabled(True)
+        self.set_status("运行中 · 正在构建筛选后的询价表格")
+
         self.runner = LoginRunner(
-            accounts, threads, settings, params, self
+            accounts,
+            threads,
+            settings,
+            params,
+            self,
+            source_data=source,
         )
         self.runner.log_message.connect(self.log)
         self.runner.build_status.connect(self._on_build_status)
@@ -871,6 +997,57 @@ class MainWindow(QMainWindow):
         self.runner.summary.connect(self._on_login_summary)
         self.runner.finished.connect(self._on_runner_finished)
         self.runner.start()
+
+        self._pending_accounts = []
+        self._pending_threads = 0
+        self._pending_settings = None
+        self._pending_params = None
+
+    def _on_feishu_data_failed(self, message: str) -> None:
+        if self._feishu_data_cancelled:
+            return
+        self.log(f"读取飞书数据失败：{message}", "error")
+        self.progress_panel.set_build_status("error", message)
+        self.progress_panel.set_chip("读取失败", "error")
+        self.progress_panel.set_thread_message(
+            "飞书数据读取失败，未进行筛选和询价", final=True
+        )
+        self._pending_accounts = []
+        self._pending_threads = 0
+        self._pending_settings = None
+        self._pending_params = None
+        self._set_run_state(RunState.IDLE)
+        self.set_status("读取飞书数据失败 · 查看运行日志")
+        if "登录" in message:
+            self.header.set_feishu_status("飞书未登录", "offline")
+
+    def _on_feishu_data_finished(self) -> None:
+        runner = self._feishu_data_runner
+        self._feishu_data_runner = None
+        if runner is not None:
+            runner.deleteLater()
+        if (
+            self._feishu_data_cancelled
+            and self.runner is None
+        ):
+            self._reset_after_filter_cancel("已取消飞书数据读取")
+
+    def _reset_after_filter_cancel(self, message: str) -> None:
+        self._pending_accounts = []
+        self._pending_threads = 0
+        self._pending_settings = None
+        self._pending_params = None
+        self._feishu_data_cancelled = False
+        self.progress_panel.reset()
+        self.progress_panel.set_chip("已取消", "idle")
+        self._set_run_state(RunState.IDLE)
+        self.log(message, "warn")
+        self.set_status(message)
+
+    @staticmethod
+    def _cleanup_filter_temp(temp_dir: Path | None) -> None:
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _toggle_pause(self) -> None:
         if self.runner is None or not self.runner.isRunning():
@@ -889,7 +1066,28 @@ class MainWindow(QMainWindow):
             self.set_status("运行中 · 正在执行线程任务")
 
     def _stop(self) -> None:
-        if self.runner is None or not self.runner.isRunning():
+        if (
+            self.runner is None
+            or not self.runner.isRunning()
+        ):
+            if (
+                self._feishu_data_runner is not None
+                and self._feishu_data_runner.isRunning()
+            ):
+                if self._run_state not in (
+                    RunState.RUNNING,
+                    RunState.PAUSED,
+                ):
+                    return
+                self._feishu_data_cancelled = True
+                self._feishu_data_runner.cancel()
+                self.action_panel.pause_btn.setEnabled(False)
+                self.action_panel.stop_btn.setEnabled(False)
+                self.log(
+                    "正在取消读取飞书数据…（等待当前读取结束）",
+                    "warn",
+                )
+                self.set_status("正在取消读取飞书数据…")
             return
         if self._run_state not in (RunState.RUNNING, RunState.PAUSED):
             return
@@ -1086,6 +1284,13 @@ class MainWindow(QMainWindow):
                 window.shutdown()
             else:
                 window.cleanup()
+        if (
+            self._feishu_data_runner is not None
+            and self._feishu_data_runner.isRunning()
+        ):
+            self._feishu_data_cancelled = True
+            self._feishu_data_runner.cancel()
+            self._feishu_data_runner.wait(30000)
         if self.runner is not None and self.runner.isRunning():
             self.runner.cancel()
             self.runner.wait(35000)

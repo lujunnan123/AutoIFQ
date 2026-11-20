@@ -744,6 +744,85 @@ QTableWidget#ManualQuoteTable QHeaderView::section {
     font-weight: 600;
 }
 
+/* ---------- 飞书筛选窗口 ---------- */
+QDialog#FeishuFilterDialog {
+    background-color: #0b1017;
+}
+QFrame#FilterConditionRow {
+    background-color: #0d151f;
+    border: 1px solid #223043;
+    border-radius: 8px;
+}
+QDialog#FeishuFilterDialog QComboBox,
+QDialog#FeishuFilterDialog QLineEdit,
+QDialog#FeishuFilterDialog QDateEdit {
+    background-color: #0b121b;
+    border: 1px solid #223043;
+    border-radius: 7px;
+    padding: 4px 9px;
+    color: #dce6f3;
+    font-size: 12px;
+    min-height: 24px;
+    selection-background-color: #2f6fd0;
+    selection-color: #ffffff;
+}
+QDialog#FeishuFilterDialog QComboBox:focus,
+QDialog#FeishuFilterDialog QLineEdit:focus,
+QDialog#FeishuFilterDialog QDateEdit:focus {
+    border-color: #3f84ff;
+}
+QDialog#FeishuFilterDialog QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+QDialog#FeishuFilterDialog QComboBox QAbstractItemView {
+    background-color: #0b121b;
+    border: 1px solid #223043;
+    color: #dce6f3;
+    selection-background-color: #17345a;
+    selection-color: #ffffff;
+}
+QScrollArea#FilterConditionScroll,
+QWidget#FilterConditionViewport,
+QWidget#FilterConditionHost {
+    background: transparent;
+    border: none;
+}
+QLabel#FilterWarning {
+    color: #f5c35a;
+    font-size: 11px;
+}
+QLabel#FilterStatus {
+    color: #7e92a9;
+    font-size: 11px;
+}
+QLabel#FilterCounts {
+    color: #c6d5e6;
+    font-size: 11px;
+    font-weight: 600;
+}
+QTableWidget#FilterPreviewTable {
+    background-color: #0b121b;
+    border: 1px solid #1b2634;
+    border-radius: 9px;
+    color: #dce6f3;
+    font-size: 12px;
+    gridline-color: #1b2634;
+}
+QTableWidget#FilterPreviewTable::item {
+    padding: 5px 8px;
+    border-bottom: 1px solid #1b2634;
+}
+QTableWidget#FilterPreviewTable QHeaderView::section {
+    background-color: #111823;
+    color: #91a3b9;
+    border: none;
+    border-bottom: 1px solid #223043;
+    padding: 6px 8px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
 /* ---------- 询问话术列表 ---------- */
 QScrollArea#PhraseScroll,
 QWidget#PhraseViewport,

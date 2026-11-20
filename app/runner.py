@@ -29,6 +29,7 @@ from .services.feishu_table import (
     FeishuLoginRequired,
     FeishuRecord,
     FeishuTableClient,
+    FeishuTableData,
     FeishuTableError,
 )
 from .services.phone_parser import mask_phone
@@ -71,19 +72,23 @@ class LoginRunner(QThread):
         settings: AppSettings,
         params: RunParams,
         parent=None,
+        source_data: FeishuTableData | None = None,
     ) -> None:
         super().__init__(parent)
         self._accounts = list(accounts)
         self._threads = max(1, min(int(threads), max(1, len(self._accounts))))
         self._settings = settings
         self._params = params
+        self._source_data = source_data
+        self._feishu_temp_dir: Path | None = (
+            source_data.temp_dir if source_data is not None else None
+        )
         self._cancel = threading.Event()
         self._pause = threading.Event()
         self._token_provider = Pxb7BrowserYdTokenProvider(
             settings.pxb7, settings.login, self._log
         )
         self._feishu_records: list[FeishuRecord] = []
-        self._feishu_temp_dir: Path | None = None
         self._output_path: Path | None = None
         self._inquiry_quoted = 0
         self._inquiry_total = 0
@@ -126,6 +131,7 @@ class LoginRunner(QThread):
     def run(self) -> None:
         total = len(self._accounts)
         if total == 0:
+            self._cleanup_feishu_temp()
             self.summary.emit(0, 0, False)
             return
 
@@ -164,16 +170,18 @@ class LoginRunner(QThread):
             )
 
         if self._cancel.is_set():
+            self._cleanup_feishu_temp()
             self.summary.emit(0, total, True)
             return
 
         # 第一步：构建表格（全局，先于线程执行）
-        if not self._build_table():
+        if not self._build_table(self._source_data):
             self.summary.emit(0, total, self._cancel.is_set())
             return
 
         if self._cancel.is_set():
             self._log("已停止：构建表格完成后未展开线程。", "warn")
+            self._cleanup_feishu_temp()
             self.summary.emit(0, total, True)
             return
 
@@ -232,28 +240,117 @@ class LoginRunner(QThread):
     # 构建表格
     # ------------------------------------------------------------------
 
-    def _build_table(self) -> bool:
-        self.build_status.emit("running", "正在读取飞书多维表格…")
+    def _build_table(
+        self, preloaded: FeishuTableData | None = None
+    ) -> bool:
+        if preloaded is not None:
+            self.build_status.emit(
+                "running", "正在构建筛选后的询价表格…"
+            )
+            self._log(
+                "使用筛选确认后的飞书数据构建询价表格…", "info"
+            )
+            source = preloaded
+            targets = [
+                record
+                for record in source.records
+                if record.image_items and not record.screenshots
+            ]
+            if targets:
+                self.build_status.emit(
+                    "running",
+                    f"正在下载选中记录的图片"
+                    f"（{len(targets)} 条）…",
+                )
+                try:
+                    source = FeishuTableClient(
+                        self._settings.feishu, self._log
+                    ).download_images(source, self._cancel)
+                except FeishuLoginRequired as exc:
+                    message = str(exc)
+                    self.build_status.emit("error", message)
+                    self.build_result.emit(False, message)
+                    self._log(
+                        f"构建表格失败：{message}", "error"
+                    )
+                    self._cleanup_feishu_temp()
+                    return False
+                except FeishuTableError as exc:
+                    message = str(exc)
+                    self.build_status.emit("error", message)
+                    self.build_result.emit(False, message)
+                    if self._cancel.is_set():
+                        self._log(
+                            "已取消下载账号内容图片。", "warn"
+                        )
+                    else:
+                        self._log(
+                            f"构建表格失败：{message}", "error"
+                        )
+                    self._cleanup_feishu_temp()
+                    return False
+                except Exception as exc:  # 防御性兜底
+                    message = f"下载账号内容图片异常：{exc}"
+                    self.build_status.emit("error", message)
+                    self.build_result.emit(False, message)
+                    self._log(message, "error")
+                    self._cleanup_feishu_temp()
+                    return False
+                self.build_status.emit(
+                    "running", "正在构建筛选后的询价表格…"
+                )
+                self._log(
+                    "选中记录的账号内容图片已准备完成。", "success"
+                )
+            limit = 0
+        else:
+            self.build_status.emit(
+                "running", "正在读取飞书多维表格…"
+            )
+            self._log(
+                "开始构建表格：从飞书多维表格读取数据…", "info"
+            )
+            limit = self._settings.excel.copy_limit
+            if limit > 0:
+                self._log(
+                    f"测试阶段：只摘录前 {limit} 条记录。", "warn"
+                )
+            try:
+                source = FeishuTableClient(
+                    self._settings.feishu, self._log
+                ).fetch_records(limit=limit)
+            except FeishuLoginRequired as exc:
+                message = str(exc)
+                self.build_status.emit("error", message)
+                self.build_result.emit(False, message)
+                self._log(f"构建表格失败：{message}", "error")
+                self._cleanup_feishu_temp()
+                return False
+            except FeishuTableError as exc:
+                message = str(exc)
+                self.build_status.emit("error", message)
+                self.build_result.emit(False, message)
+                self._log(f"构建表格失败：{message}", "error")
+                self._cleanup_feishu_temp()
+                return False
+            except Exception as exc:  # 防御性兜底
+                message = f"读取飞书数据异常：{exc}"
+                self.build_status.emit("error", message)
+                self.build_result.emit(False, message)
+                self._log(message, "error")
+                self._cleanup_feishu_temp()
+                return False
+
+        self._feishu_records = list(source.records)
+        self._feishu_temp_dir = source.temp_dir
         self._log(
-            "开始构建表格：从飞书多维表格读取数据…", "info"
+            f"数据源读取完成：{source.source_name}，"
+            f"源表 {source.total_records} 条，"
+            f"本次使用 {len(source.rows)} 条。",
+            "success",
         )
-        limit = self._settings.excel.copy_limit
-        if limit > 0:
-            self._log(
-                f"测试阶段：只摘录前 {limit} 条记录。", "warn"
-            )
+
         try:
-            source = FeishuTableClient(
-                self._settings.feishu, self._log
-            ).fetch_records(limit=limit)
-            self._feishu_records = list(source.records)
-            self._feishu_temp_dir = source.temp_dir
-            self._log(
-                f"数据源读取完成：{source.source_name}，"
-                f"源表 {source.total_records} 条，"
-                f"摘录 {len(source.rows)} 条。",
-                "success",
-            )
             result = build_result_table(
                 source.rows,
                 source.source_name,
@@ -274,14 +371,7 @@ class LoginRunner(QThread):
                     self._log(
                         f"追加商家报价列失败：{exc}", "error"
                     )
-        except FeishuLoginRequired as exc:
-            message = str(exc)
-            self.build_status.emit("error", message)
-            self.build_result.emit(False, message)
-            self._log(f"构建表格失败：{message}", "error")
-            self._cleanup_feishu_temp()
-            return False
-        except (FeishuTableError, ExcelTableError) as exc:
+        except ExcelTableError as exc:
             message = str(exc)
             self.build_status.emit("error", message)
             self.build_result.emit(False, message)
@@ -297,19 +387,19 @@ class LoginRunner(QThread):
             return False
 
         detail = (
-            f"飞书 · 已摘录 {result.copied_records} 条 / "
+            f"飞书 · 已使用 {result.copied_records} 条 / "
             f"源表 {source.total_records} 条 · "
             f"{result.output_path.name}"
         )
         self.build_status.emit("done", detail)
         self.build_result.emit(True, str(result.output_path))
         self._log(
-            f"构建表格完成：从「{result.source_sheet}」摘录 "
+            f"构建表格完成：从「{result.source_sheet}」使用 "
             f"{result.copied_records} 条（源表 {source.total_records} 条）。",
             "success",
         )
         self._log(f"新表格已保存：{result.output_path}", "success")
-        if source.total_records > result.copied_records:
+        if preloaded is None and source.total_records > result.copied_records:
             self._log(
                 f"测试阶段只摘录前 {result.copied_records} 条；"
                 "将 config.json 的 excel.copy_limit 设为 0 可摘录更多。",
