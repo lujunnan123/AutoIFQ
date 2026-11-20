@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
 
 from ..constants import PARAMETER_FIELDS, SpinFieldSpec
 from ..models import RunParams
+from ..utils import repolish
 from .card import Card
 from .click_outside import ClickOutsideFilter
 from .merchant_selector import MerchantSelector
@@ -26,9 +27,26 @@ class ParameterPanel(Card):
     valuesChanged = pyqtSignal()
     merchantsChanged = pyqtSignal()
     proxySettingsRequested = pyqtSignal()
+    proxyToggleRequested = pyqtSignal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("运行参数", "线程、间隔与咨询商家", parent)
+
+        self._proxy_enabled = False
+        self.proxy_toggle = QPushButton()
+        self.proxy_toggle.setObjectName("ProxyToggle")
+        self.proxy_toggle.setFixedSize(14, 14)
+        self.proxy_toggle.setCursor(
+            Qt.CursorShape.PointingHandCursor
+        )
+        self.proxy_toggle.setFocusPolicy(
+            Qt.FocusPolicy.NoFocus
+        )
+        self.proxy_toggle.clicked.connect(
+            self._on_proxy_toggle_clicked
+        )
+        self.add_header_widget(self.proxy_toggle)
+        self.set_proxy_enabled(False)
 
         self.proxy_btn = QPushButton("代理设置")
         self.proxy_btn.setObjectName("Ghost")
@@ -127,6 +145,24 @@ class ParameterPanel(Card):
             merchants=self.selected_merchants(),
             phrases=phrases,
         )
+
+    def set_proxy_enabled(self, enabled: bool) -> None:
+        self._proxy_enabled = bool(enabled)
+        self.proxy_toggle.setProperty(
+            "proxyState", "on" if enabled else "off"
+        )
+        if enabled:
+            tooltip = "代理已开启（绿色），点击关闭"
+        else:
+            tooltip = "代理已关闭（红色），点击开启"
+        self.proxy_toggle.setToolTip(tooltip)
+        repolish(self.proxy_toggle)
+
+    def proxy_enabled(self) -> bool:
+        return self._proxy_enabled
+
+    def _on_proxy_toggle_clicked(self) -> None:
+        self.proxyToggleRequested.emit(not self._proxy_enabled)
 
     # ------------------------------------------------------------------
     # 咨询商家

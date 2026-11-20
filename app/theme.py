@@ -552,6 +552,19 @@ QPushButton#GhostDanger:disabled {
     background-color: transparent;
     border-color: #2a1c21;
 }
+QPushButton#ProxyToggle {
+    padding: 0;
+    border: 1px solid #7a2d3a;
+    border-radius: 7px;
+    background-color: #ff5f75;
+}
+QPushButton#ProxyToggle[proxyState="on"] {
+    border-color: #1f6b48;
+    background-color: #39d98a;
+}
+QPushButton#ProxyToggle:hover {
+    border-color: #ffffff;
+}
 QPushButton#ManualInquiryButton {
     background-color: #0d141d;
     border: 1px dashed #2c4058;

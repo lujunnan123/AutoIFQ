@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
@@ -33,6 +34,8 @@ from ..services.feishu_common import feishu_logged_in
 from ..services.merchant_store import MerchantStore, MerchantStoreError
 from ..services.parameter_store import ParameterStore, ParameterStoreError
 from ..services.phrase_store import PhraseStore, PhraseStoreError
+from ..services.proxy_provider import ProxyStore, ProxyStoreError
+from ..services.pxb7_merchant import state_available
 from ..settings import SettingsError, load_settings
 from ..utils import fmt_size
 from .action_panel import ActionPanel
@@ -52,6 +55,7 @@ class MainWindow(QMainWindow):
         phrase_store: PhraseStore | None = None,
         parameter_store: ParameterStore | None = None,
         merchant_store: MerchantStore | None = None,
+        proxy_store: ProxyStore | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle(WINDOW_TITLE)
@@ -73,6 +77,7 @@ class MainWindow(QMainWindow):
         self._pxb7_ready = False
 
         self._merchant_store = merchant_store or MerchantStore()
+        self._proxy_store = proxy_store or ProxyStore()
         self._merchant_cache_error: str | None = None
         self._merchant_save_error_logged = False
         self._has_merchant_cache = False
@@ -103,11 +108,13 @@ class MainWindow(QMainWindow):
 
         self.action_panel.set_state(RunState.IDLE)
         self._refresh_feishu_chip()
-        self.header.set_pxb7_status("螃蟹未登录", "offline")
+        self._refresh_pxb7_chip()
+        self._apply_cached_merchants()
+        self._refresh_proxy_toggle()
         self.set_status("就绪 · 等待导入账号清单")
         self.log(
-            "AutoIFQ 界面已加载，请导入账号清单（.txt），"
-            "并登录飞书、螃蟹账号获取咨询商家后开始。",
+            "AutoIFQ 界面已加载，请导入账号清单（.txt）；"
+            "飞书和螃蟹优先使用本地保存的登录状态。",
             "accent",
         )
         if self._merchant_cache_error:
@@ -116,11 +123,19 @@ class MainWindow(QMainWindow):
                 "warn",
             )
         elif self._has_merchant_cache:
-            self.log(
-                f"已缓存 {len(self._cached_merchants)} 个咨询商家；"
-                "点击右上角螃蟹状态刷新后使用。",
-                "muted",
-            )
+            if self._pxb7_ready:
+                self.log(
+                    f"已恢复螃蟹登录状态，并从本地缓存加载 "
+                    f"{len(self._cached_merchants)} 个咨询商家；"
+                    "点击右上角螃蟹状态可刷新商家列表。",
+                    "muted",
+                )
+            else:
+                self.log(
+                    f"已缓存 {len(self._cached_merchants)} 个咨询商家；"
+                    "点击右上角螃蟹状态验证登录后使用。",
+                    "muted",
+                )
         if self._loaded_phrase_count:
             self.log(
                 f"已加载 {self._loaded_phrase_count} 条询问话术。", "muted"
@@ -240,6 +255,9 @@ class MainWindow(QMainWindow):
         )
         self.parameter_panel.proxySettingsRequested.connect(
             self._open_proxy_settings
+        )
+        self.parameter_panel.proxyToggleRequested.connect(
+            self._toggle_proxy
         )
 
     # ------------------------------------------------------------------
@@ -441,6 +459,25 @@ class MainWindow(QMainWindow):
     # 螃蟹登录 / 咨询商家
     # ------------------------------------------------------------------
 
+    def _pxb7_state_present(self) -> bool:
+        try:
+            settings = load_settings()
+        except SettingsError:
+            return False
+        return state_available(settings.pxb7_account)
+
+    def _refresh_pxb7_chip(self) -> None:
+        if self._pxb7_state_present():
+            self.header.set_pxb7_status("螃蟹已登录", "online")
+            self.header.pxb7_chip.setToolTip(
+                "已保存螃蟹登录状态；点击可刷新咨询商家"
+            )
+        else:
+            self.header.set_pxb7_status("螃蟹未登录", "offline")
+            self.header.pxb7_chip.setToolTip(
+                "点击登录螃蟹账号并获取咨询商家"
+            )
+
     def _start_pxb7_login(self) -> None:
         if (
             self._pxb7_login_runner is not None
@@ -514,22 +551,17 @@ class MainWindow(QMainWindow):
             self.log("未获取到三角洲行动咨询商家。", "warn")
             return
 
-        if self._has_merchant_cache:
-            selected = [
-                name for name in self._cached_selected if name in seen
-            ]
-        else:
-            selected = list(values)
-
+        # 每次登录/刷新获取商家后全部保持未选中，由用户重新勾选。
+        selected: list[str] = []
         self.parameter_panel.set_merchants(values, selected)
         self._pxb7_ready = True
         self.log(
             f"已加载 {len(values)} 个咨询商家，"
-            f"已勾选 {len(selected)} 个。",
+            "所有商家默认未选中，请手动勾选后再开始询价。",
             "success",
         )
         self.set_status(
-            f"螃蟹已登录 · 已获取 {len(values)} 个咨询商家"
+            f"螃蟹已登录 · 已获取 {len(values)} 个咨询商家 · 请勾选商家"
         )
 
     def _on_pxb7_completed(self, success: bool, detail: str) -> None:
@@ -552,23 +584,87 @@ class MainWindow(QMainWindow):
     # 代理设置
     # ------------------------------------------------------------------
 
-    def _open_proxy_settings(self) -> None:
-        if (
-            self.runner is not None
-            and self.runner.isRunning()
-        ) or (
-            self._feishu_login_runner is not None
-            and self._feishu_login_runner.isRunning()
-        ) or (
-            self._pxb7_login_runner is not None
-            and self._pxb7_login_runner.isRunning()
-        ):
-            self.log("请停止当前任务或登录流程后再修改代理设置。", "warn")
+    def _proxy_settings_busy(self) -> bool:
+        return bool(
+            (self.runner is not None and self.runner.isRunning())
+            or (
+                self._feishu_login_runner is not None
+                and self._feishu_login_runner.isRunning()
+            )
+            or (
+                self._pxb7_login_runner is not None
+                and self._pxb7_login_runner.isRunning()
+            )
+            or any(
+                window.is_busy()
+                for window in self._manual_inquiry_windows
+            )
+        )
+
+    def _refresh_proxy_toggle(self) -> None:
+        try:
+            settings = self._proxy_store.load()
+        except ProxyStoreError as exc:
+            self.log(f"代理设置读取失败：{exc}", "warn")
+            self.parameter_panel.set_proxy_enabled(False)
+            return
+        self.parameter_panel.set_proxy_enabled(settings.enabled)
+
+    def _toggle_proxy(self, enabled: bool) -> None:
+        if self._proxy_settings_busy():
+            self.log(
+                "请停止当前任务或登录流程后再切换代理。", "warn"
+            )
+            self._refresh_proxy_toggle()
             return
 
-        dialog = ProxySettingsDialog(self)
+        try:
+            current = self._proxy_store.load()
+        except ProxyStoreError as exc:
+            self.log(f"代理设置读取失败：{exc}", "error")
+            self._refresh_proxy_toggle()
+            return
+
+        if enabled and not current.api_url.strip():
+            self.log(
+                "代理接口地址为空，请先在「代理设置」中填写接口地址。",
+                "warn",
+            )
+            self.parameter_panel.set_proxy_enabled(False)
+            self.set_status("代理未开启 · 缺少代理接口")
+            return
+
+        try:
+            self._proxy_store.save(replace(current, enabled=enabled))
+        except ProxyStoreError as exc:
+            self.log(f"代理开关保存失败：{exc}", "error")
+            self._refresh_proxy_toggle()
+            return
+
+        self.parameter_panel.set_proxy_enabled(enabled)
+        if enabled:
+            self.log(
+                "代理开关已开启：后续运行将使用随机代理。",
+                "info",
+            )
+            self.set_status("代理已开启 · 后续运行使用随机代理")
+        else:
+            self.log(
+                "代理开关已关闭：后续运行将直连。", "warn"
+            )
+            self.set_status("代理已关闭 · 后续运行直连")
+
+    def _open_proxy_settings(self) -> None:
+        if self._proxy_settings_busy():
+            self.log(
+                "请停止当前任务或登录流程后再修改代理设置。", "warn"
+            )
+            return
+
+        dialog = ProxySettingsDialog(self, store=self._proxy_store)
         if dialog.exec() and dialog.saved_settings is not None:
             settings = dialog.saved_settings
+            self.parameter_panel.set_proxy_enabled(settings.enabled)
             if settings.enabled:
                 self.log(
                     "代理设置已保存：子线程将使用随机代理；"
@@ -642,6 +738,16 @@ class MainWindow(QMainWindow):
         self._has_merchant_cache = True
         self._cached_merchants = cache.merchants
         self._cached_selected = cache.selected
+
+    def _apply_cached_merchants(self) -> None:
+        if not self._has_merchant_cache or not self._cached_merchants:
+            return
+        self.parameter_panel.set_merchants(
+            self._cached_merchants,
+            self._cached_selected,
+        )
+        if self._pxb7_state_present():
+            self._pxb7_ready = True
 
     def _save_merchant_cache(self) -> None:
         merchants = self.parameter_panel.merchants()
